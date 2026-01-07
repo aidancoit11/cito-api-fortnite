@@ -1,0 +1,400 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===== OAUTH TOKEN STORAGE (CRITICAL) =====
+model OAuthToken {
+  id            String   @id @default(uuid())
+  accountId     String   @map("account_id")
+  accessToken   String   @map("access_token") @db.Text
+  refreshToken  String   @map("refresh_token") @db.Text
+  expiresAt     DateTime @map("expires_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  lastRefreshed DateTime @default(now()) @map("last_refreshed")
+
+  @@map("oauth_tokens")
+}
+
+// ===== TOURNAMENTS =====
+model Tournament {
+  tournamentId           String                    @id @map("tournament_id")
+  name                   String                    @db.VarChar(500)
+  organizer              String?                   @db.VarChar(255)
+  startDate              DateTime?                 @map("start_date")
+  endDate                DateTime?                 @map("end_date")
+  region                 String?                   @db.VarChar(50)
+  prizePool              Decimal?                  @map("prize_pool") @db.Decimal
+  format                 String?                   @db.VarChar(50)
+  registrationOpen       Boolean?                  @map("registration_open")
+  registrationDeadline   DateTime?                 @map("registration_deadline")
+  url                    String?                   @db.Text
+  schedule               Json?
+  isCompleted            Boolean                   @default(false) @map("is_completed")
+  data                   Json?
+  lastUpdated            DateTime                  @default(now()) @map("last_updated")
+
+  results                TournamentResult[]
+  matches                MatchResult[]
+  playerHistory          PlayerTournamentHistory[]
+  orgHistory             OrgTournamentHistory[]
+
+  @@map("tournaments")
+}
+
+// ===== TOURNAMENT RESULTS (TOP 500) =====
+model TournamentResult {
+  id             String      @id @default(uuid())
+  tournamentId   String      @map("tournament_id")
+  accountId      String      @map("account_id")
+  displayName    String      @map("display_name") @db.VarChar(255)
+  rank           Int
+  points         Decimal     @db.Decimal
+  kills          Int?
+  wins           Int?
+  matchesPlayed  Int?        @map("matches_played")
+  earnings       Decimal?    @db.Decimal
+  teamName       String?     @map("team_name") @db.VarChar(255)
+  orgSlug        String?     @map("org_slug") @db.VarChar(255)
+  data           Json?
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  tournament     Tournament  @relation(fields: [tournamentId], references: [tournamentId])
+
+  @@unique([tournamentId, accountId])
+  @@index([tournamentId, rank])
+  @@index([accountId])
+  @@index([orgSlug])
+  @@map("tournament_results")
+}
+
+// ===== MATCH RESULTS (MATCH-BY-MATCH) =====
+model MatchResult {
+  id            String      @id @default(uuid())
+  tournamentId  String      @map("tournament_id")
+  matchId       String      @map("match_id")
+  matchNumber   Int         @map("match_number")
+  accountId     String      @map("account_id")
+  displayName   String      @map("display_name") @db.VarChar(255)
+  placement     Int?
+  kills         Int?
+  points        Decimal?    @db.Decimal
+  damageDealt   Int?        @map("damage_dealt")
+  timeAlive     Int?        @map("time_alive")
+  data          Json?
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  tournament    Tournament  @relation(fields: [tournamentId], references: [tournamentId])
+
+  @@unique([tournamentId, matchId, accountId])
+  @@index([tournamentId, matchNumber])
+  @@index([accountId])
+  @@map("match_results")
+}
+
+// ===== PLAYER TOURNAMENT HISTORY =====
+model PlayerTournamentHistory {
+  id             String      @id @default(uuid())
+  accountId      String      @map("account_id")
+  tournamentId   String      @map("tournament_id")
+  placement      Int?
+  points         Decimal?    @db.Decimal
+  kills          Int?
+  matchesPlayed  Int?        @map("matches_played")
+  earnings       Decimal?    @db.Decimal
+  teamName       String?     @map("team_name") @db.VarChar(255)
+  orgSlug        String?     @map("org_slug") @db.VarChar(255)
+  lastUpdated    DateTime    @default(now()) @map("last_updated")
+
+  tournament     Tournament  @relation(fields: [tournamentId], references: [tournamentId])
+
+  @@unique([accountId, tournamentId])
+  @@index([accountId])
+  @@map("player_tournament_history")
+}
+
+// ===== PLAYER STATS CACHE =====
+model PlayerStatsCache {
+  accountId         String   @id @map("account_id")
+  displayName       String?  @map("display_name") @db.VarChar(255)
+  stats             Json
+  currentOrgSlug    String?  @map("current_org_slug") @db.VarChar(255)
+  totalTournaments  Int      @default(0) @map("total_tournaments")
+  totalEarnings     Decimal  @default(0) @map("total_earnings") @db.Decimal
+  bestPlacement     Int?     @map("best_placement")
+  lastUpdated       DateTime @default(now()) @map("last_updated")
+  isActive          Boolean  @default(true) @map("is_active")
+
+  @@map("player_stats_cache")
+}
+
+// ===== PLAYER EARNINGS (LEGACY - KEEP FOR BACKWARDS COMPAT) =====
+model PlayerEarnings {
+  accountId        String   @id @map("account_id")
+  displayName      String?  @map("display_name") @db.VarChar(255)
+  totalEarnings    Decimal  @default(0) @map("total_earnings") @db.Decimal
+  tournamentCount  Int      @default(0) @map("tournament_count")
+  breakdown        Json?
+  lastUpdated      DateTime @default(now()) @map("last_updated")
+
+  @@map("player_earnings")
+}
+
+// ===== PLAYER IDENTITY (NEW) =====
+model Player {
+  playerId      String    @id @default(uuid()) @map("player_id")
+  epicAccountId String?   @unique @map("epic_account_id") @db.VarChar(255)
+  currentIgn    String    @map("current_ign") @db.VarChar(255)
+  realName      String?   @map("real_name") @db.VarChar(255)
+  nationality   String?   @db.VarChar(3)
+  country       String?   @db.VarChar(100)
+  birthDate     DateTime? @map("birth_date") @db.Date
+  wikiUrl       String?   @map("wiki_url") @db.Text
+  imageUrl      String?   @map("image_url") @db.Text
+  socialMedia   Json?     @map("social_media")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastUpdated   DateTime  @default(now()) @map("last_updated")
+
+  ignHistory          PlayerIgnHistory[]
+  rosterHistory       TeamRoster[]
+  transfers           PlayerTransfer[]
+  tournamentEarnings  PlayerTournamentEarning[]
+  earningsSummary     PlayerEarningsSummary?
+
+  @@index([currentIgn])
+  @@index([epicAccountId])
+  @@map("players")
+}
+
+// ===== PLAYER IGN HISTORY =====
+model PlayerIgnHistory {
+  id        String    @id @default(uuid())
+  playerId  String    @map("player_id")
+  ign       String    @db.VarChar(255)
+  usedFrom  DateTime  @map("used_from")
+  usedUntil DateTime? @map("used_until")
+
+  player    Player    @relation(fields: [playerId], references: [playerId])
+
+  @@index([playerId])
+  @@index([ign])
+  @@map("player_ign_history")
+}
+
+// ===== PLAYER TOURNAMENT EARNINGS (DETAILED) =====
+model PlayerTournamentEarning {
+  id              String    @id @default(uuid())
+  playerId        String    @map("player_id")
+  tournamentId    String    @map("tournament_id")
+  tournamentName  String    @map("tournament_name") @db.VarChar(500)
+  tournamentDate  DateTime  @map("tournament_date") @db.Date
+  placement       Int
+  earnings        Decimal   @db.Decimal(12, 2)
+  prizePool       Decimal?  @map("prize_pool") @db.Decimal(14, 2)
+  tier            String?   @db.VarChar(20)
+  gameMode        String?   @map("game_mode") @db.VarChar(20)
+  region          String?   @db.VarChar(50)
+  season          String?   @db.VarChar(50)
+  teamSize        Int       @default(1) @map("team_size")
+  teammates       Json?
+  orgSlugAtTime   String?   @map("org_slug_at_time") @db.VarChar(255)
+  wikiUrl         String?   @map("wiki_url") @db.Text
+  source          String    @default("liquipedia") @db.VarChar(50)
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  player          Player    @relation(fields: [playerId], references: [playerId])
+
+  @@unique([playerId, tournamentId])
+  @@index([playerId])
+  @@index([tournamentDate])
+  @@index([orgSlugAtTime])
+  @@map("player_tournament_earnings")
+}
+
+// ===== PLAYER EARNINGS SUMMARY (AGGREGATED) =====
+model PlayerEarningsSummary {
+  playerId           String    @id @map("player_id")
+  totalEarnings      Decimal   @default(0) @map("total_earnings") @db.Decimal(12, 2)
+  tournamentCount    Int       @default(0) @map("tournament_count")
+  firstPlaceCount    Int       @default(0) @map("first_place_count")
+  top10Count         Int       @default(0) @map("top_10_count")
+  avgPlacement       Decimal?  @map("avg_placement") @db.Decimal(5, 2)
+  bestPlacement      Int?      @map("best_placement")
+  highestEarning     Decimal?  @map("highest_earning") @db.Decimal(12, 2)
+  earningsByYear     Json?     @map("earnings_by_year")
+  earningsByRegion   Json?     @map("earnings_by_region")
+  lastTournamentDate DateTime? @map("last_tournament_date")
+  lastUpdated        DateTime  @default(now()) @map("last_updated")
+
+  player             Player    @relation(fields: [playerId], references: [playerId])
+
+  @@map("player_earnings_summary")
+}
+
+// ===== ORG EARNINGS SUMMARY =====
+model OrgEarningsSummary {
+  orgSlug            String       @id @map("org_slug")
+  totalEarnings      Decimal      @default(0) @map("total_earnings") @db.Decimal(12, 2)
+  tournamentCount    Int          @default(0) @map("tournament_count")
+  firstPlaceCount    Int          @default(0) @map("first_place_count")
+  playerCount        Int          @default(0) @map("player_count")
+  earningsByYear     Json?        @map("earnings_by_year")
+  earningsByPlayer   Json?        @map("earnings_by_player")
+  lastUpdated        DateTime     @default(now()) @map("last_updated")
+
+  organization       Organization @relation(fields: [orgSlug], references: [slug])
+
+  @@map("org_earnings_summary")
+}
+
+// ===== ORGANIZATIONS =====
+model Organization {
+  orgId              String         @id @default(uuid()) @map("org_id")
+  slug               String         @unique @db.VarChar(255)
+  name               String         @db.VarChar(500)
+  logoUrl            String?        @map("logo_url") @db.Text
+  region             String?        @db.VarChar(50)
+  website            String?        @db.Text
+  socialMedia        Json?          @map("social_media")
+  foundedDate        DateTime?      @map("founded_date") @db.Date
+  disbandedDate      DateTime?      @map("disbanded_date") @db.Date
+  headquarters       String?        @db.VarChar(255)
+  approxTotalWinnings Decimal?      @map("approx_total_winnings") @db.Decimal(14, 2)
+  description        String?        @db.Text
+  createdAt          DateTime       @default(now()) @map("created_at")
+  lastUpdated        DateTime       @default(now()) @map("last_updated")
+
+  roster          TeamRoster[]
+  transfersFrom   PlayerTransfer[] @relation("TransfersFrom")
+  transfersTo     PlayerTransfer[] @relation("TransfersTo")
+  history         OrgTournamentHistory[]
+  earningsSummary OrgEarningsSummary?
+
+  @@index([slug])
+  @@index([region])
+  @@map("organizations")
+}
+
+// ===== TEAM ROSTERS =====
+model TeamRoster {
+  id            String       @id @default(uuid())
+  orgSlug       String       @map("org_slug") @db.VarChar(255)
+  playerId      String?      @map("player_id")
+  accountId     String?      @map("account_id") @db.VarChar(255)
+  playerName    String       @map("player_name") @db.VarChar(255)
+  role          String       @db.VarChar(50)
+  status        String       @default("current") @db.VarChar(20)
+  joinDate      DateTime?    @map("join_date") @db.Date
+  leaveDate     DateTime?    @map("leave_date") @db.Date
+  leaveReason   String?      @map("leave_reason") @db.VarChar(100)
+  nationality   String?      @db.VarChar(3)
+  socialMedia   Json?        @map("social_media")
+  isActive      Boolean      @default(true) @map("is_active")
+  lastUpdated   DateTime     @default(now()) @map("last_updated")
+
+  organization  Organization @relation(fields: [orgSlug], references: [slug])
+  player        Player?      @relation(fields: [playerId], references: [playerId])
+
+  @@index([orgSlug])
+  @@index([playerId])
+  @@index([accountId])
+  @@index([status])
+  @@map("team_rosters")
+}
+
+// ===== PLAYER TRANSFERS =====
+model PlayerTransfer {
+  transferId      String        @id @default(uuid()) @map("transfer_id")
+  playerId        String?       @map("player_id")
+  accountId       String        @map("account_id") @db.VarChar(255)
+  playerName      String        @map("player_name") @db.VarChar(255)
+  fromOrgSlug     String?       @map("from_org_slug") @db.VarChar(255)
+  toOrgSlug       String?       @map("to_org_slug") @db.VarChar(255)
+  transferDate    DateTime      @map("transfer_date") @db.Date
+  transferType    String        @map("transfer_type") @db.VarChar(50)
+  announcementUrl String?       @map("announcement_url") @db.Text
+  details         String?       @db.Text
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  player          Player?       @relation(fields: [playerId], references: [playerId])
+  fromOrg         Organization? @relation("TransfersFrom", fields: [fromOrgSlug], references: [slug])
+  toOrg           Organization? @relation("TransfersTo", fields: [toOrgSlug], references: [slug])
+
+  @@index([playerId])
+  @@index([accountId])
+  @@index([fromOrgSlug])
+  @@index([toOrgSlug])
+  @@index([transferDate(sort: Desc)])
+  @@map("player_transfers")
+}
+
+// ===== ORGANIZATION TOURNAMENT HISTORY =====
+model OrgTournamentHistory {
+  id            String       @id @default(uuid())
+  orgSlug       String       @map("org_slug") @db.VarChar(255)
+  tournamentId  String       @map("tournament_id") @db.VarChar(255)
+  accountId     String       @map("account_id") @db.VarChar(255)
+  playerName    String       @map("player_name") @db.VarChar(255)
+  placement     Int
+  earnings      Decimal?     @db.Decimal
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  organization  Organization @relation(fields: [orgSlug], references: [slug])
+  tournament    Tournament   @relation(fields: [tournamentId], references: [tournamentId])
+
+  @@index([orgSlug])
+  @@map("org_tournament_history")
+}
+
+// ===== GAME TIMELINE =====
+model GameTimeline {
+  id             String    @id @default(uuid())
+  season         Int
+  chapter        Int
+  currentPhase   String?   @map("current_phase") @db.VarChar(100)
+  seasonStart    DateTime? @map("season_start")
+  seasonEnd      DateTime? @map("season_end")
+  battlePassEnd  DateTime? @map("battle_pass_end")
+  currentMap     String?   @map("current_map") @db.VarChar(255)
+  activeEvents   Json?     @map("active_events")
+  mapChanges     Json?     @map("map_changes")
+  isCurrent      Boolean   @default(false) @map("is_current")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  lastUpdated    DateTime  @default(now()) @map("last_updated")
+
+  @@unique([chapter, season])
+  @@index([isCurrent])
+  @@map("game_timeline")
+}
+
+// ===== API KEYS =====
+model ApiKey {
+  id         String    @id @default(uuid())
+  keyHash    String    @unique @map("key_hash") @db.VarChar(255)
+  userEmail  String?   @map("user_email") @db.VarChar(255)
+  rateLimit  Int       @default(1000) @map("rate_limit")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  expiresAt  DateTime? @map("expires_at")
+
+  @@map("api_keys")
+}
+
+// ===== SCRAPER SCHEDULES =====
+model ScrapeSchedule {
+  id               String    @id @default(uuid())
+  jobName          String    @unique @map("job_name") @db.VarChar(255)
+  lastRun          DateTime? @map("last_run")
+  nextRun          DateTime? @map("next_run")
+  status           String?   @db.VarChar(50)
+  recordsProcessed Int?      @map("records_processed")
+  errorMessage     String?   @map("error_message") @db.Text
+
+  @@map("scrape_schedules")
+}

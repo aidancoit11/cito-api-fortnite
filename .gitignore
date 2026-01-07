@@ -1,0 +1,92 @@
+# =================================
+# FORTNITE COMPETITIVE API - GITIGNORE
+# =================================
+
+# ---------------------------------
+# ENVIRONMENT VARIABLES (CRITICAL - NEVER COMMIT)
+# ---------------------------------
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ---------------------------------
+# DEPENDENCIES
+# ---------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ---------------------------------
+# BUILD OUTPUT
+# ---------------------------------
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+
+# ---------------------------------
+# LOGS
+# ---------------------------------
+logs/
+*.log
+
+# ---------------------------------
+# DATABASE
+# ---------------------------------
+*.db
+*.sqlite
+*.sqlite3
+prisma/migrations/*.sql
+
+# ---------------------------------
+# TESTING
+# ---------------------------------
+coverage/
+.nyc_output/
+*.lcov
+
+# ---------------------------------
+# IDE / EDITOR
+# ---------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ---------------------------------
+# TEMPORARY FILES
+# ---------------------------------
+*.tmp
+*.temp
+tmp/
+temp/
+
+# ---------------------------------
+# SECRETS & CREDENTIALS (CRITICAL)
+# ---------------------------------
+# Device auth files
+device-auth.json
+credentials.json
+secrets.json
+
+# API keys
+*.key
+*.pem
+*.cert
+
+# ---------------------------------
+# MISC
+# ---------------------------------
+.turbo
+.vercel
+.netlify

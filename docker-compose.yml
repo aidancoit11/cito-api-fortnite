@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - PROXY_LIST=${PROXY_LIST}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Sync worker - runs overnight syncs
+  sync-worker:
+    build: .
+    command: ["node", "dist/scripts/overnight-sync.js"]
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - PROXY_LIST=${PROXY_LIST}
+    restart: "no"
+    profiles:
+      - sync
+
+# To run sync: docker-compose --profile sync up sync-worker
