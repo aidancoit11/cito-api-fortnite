@@ -1,13 +1,16 @@
 import { config } from '../../config/index.js';
 import { epicAuthService, OAuthTokenResponse } from './auth.service.js';
+import { prisma } from '../../db/client.js';
 
 /**
  * Token Manager Service
  * Singleton that manages Epic Games OAuth tokens with auto-refresh
  *
- * Usage:
- *   const token = await tokenManager.getToken();
- *   // Use token for Epic API requests
+ * Features:
+ * - Auto-refresh tokens before expiration
+ * - Database fallback for device auth credentials
+ * - Detailed error logging
+ * - Graceful degradation
  */
 
 interface TokenState {
@@ -18,42 +21,172 @@ interface TokenState {
   accountId: string;
 }
 
+interface DeviceAuthCredentials {
+  deviceId: string;
+  accountId: string;
+  deviceSecret: string;
+  source: 'env' | 'database';
+}
+
 class TokenManager {
   private tokenState: TokenState | null = null;
   private refreshPromise: Promise<string> | null = null;
   private initialized = false;
+  private lastError: string | null = null;
 
   // Refresh token 5 minutes before expiration
   private readonly REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
   /**
    * Initialize the token manager with device auth credentials
-   * Call this once at app startup
+   * Tries .env first, then falls back to database
    */
   async initialize(): Promise<void> {
-    if (this.initialized) {
-      console.log('⚡ Token manager already initialized');
+    if (this.initialized && this.tokenState) {
+      console.log('[TokenManager] Already initialized with valid token');
       return;
     }
 
-    const { deviceId, accountId, deviceSecret } = config.epic;
+    console.log('[TokenManager] Initializing...');
 
-    if (!deviceId || !accountId || !deviceSecret) {
-      console.warn(
-        '⚠️  Device auth credentials not configured. Run "npm run generate-auth" first.'
-      );
+    // Try to get credentials (env first, then database)
+    const credentials = await this.getDeviceAuthCredentials();
+
+    if (!credentials) {
+      this.lastError = 'No device auth credentials found in .env or database';
+      console.warn(`[TokenManager] ${this.lastError}`);
+      console.warn('[TokenManager] Run "npm run generate-auth" to generate device auth credentials');
       return;
     }
 
-    console.log('🔐 Initializing token manager...');
+    console.log(`[TokenManager] Using credentials from ${credentials.source}`);
+    console.log(`[TokenManager] Account ID: ${credentials.accountId}`);
 
     try {
-      await this.refreshWithDeviceAuth();
+      await this.refreshWithDeviceAuth(credentials);
       this.initialized = true;
-      console.log('✅ Token manager initialized successfully');
+      this.lastError = null;
+      console.log('[TokenManager] Initialized successfully');
+
+      // Update last used timestamp in database
+      if (credentials.source === 'database') {
+        await this.updateCredentialLastUsed(credentials.accountId);
+      }
+    } catch (error: any) {
+      this.lastError = `Failed to initialize: ${error.message}`;
+      console.error(`[TokenManager] ${this.lastError}`);
+
+      // If env credentials failed, try database
+      if (credentials.source === 'env') {
+        console.log('[TokenManager] Trying database credentials as fallback...');
+        const dbCredentials = await this.getDeviceAuthFromDatabase();
+        if (dbCredentials && dbCredentials.accountId !== credentials.accountId) {
+          try {
+            await this.refreshWithDeviceAuth(dbCredentials);
+            this.initialized = true;
+            this.lastError = null;
+            console.log('[TokenManager] Initialized with database credentials');
+            await this.updateCredentialLastUsed(dbCredentials.accountId);
+          } catch (dbError: any) {
+            this.lastError = `Both env and database credentials failed: ${dbError.message}`;
+            console.error(`[TokenManager] ${this.lastError}`);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Get device auth credentials - tries env first, then database
+   */
+  private async getDeviceAuthCredentials(): Promise<DeviceAuthCredentials | null> {
+    // First try environment variables
+    const { deviceId, accountId, deviceSecret } = config.epic;
+
+    if (deviceId && accountId && deviceSecret) {
+      return {
+        deviceId,
+        accountId,
+        deviceSecret,
+        source: 'env',
+      };
+    }
+
+    // Fallback to database
+    return this.getDeviceAuthFromDatabase();
+  }
+
+  /**
+   * Get device auth credentials from database
+   */
+  private async getDeviceAuthFromDatabase(): Promise<DeviceAuthCredentials | null> {
+    try {
+      const credential = await prisma.deviceAuthCredential.findFirst({
+        where: { isActive: true },
+        orderBy: { lastUsed: 'desc' },
+      });
+
+      if (credential) {
+        return {
+          deviceId: credential.deviceId,
+          accountId: credential.accountId,
+          deviceSecret: credential.deviceSecret,
+          source: 'database',
+        };
+      }
+    } catch (error: any) {
+      console.error('[TokenManager] Failed to query database for credentials:', error.message);
+    }
+
+    return null;
+  }
+
+  /**
+   * Update last used timestamp for credentials
+   */
+  private async updateCredentialLastUsed(accountId: string): Promise<void> {
+    try {
+      await prisma.deviceAuthCredential.update({
+        where: { accountId },
+        data: { lastUsed: new Date(), updatedAt: new Date() },
+      });
     } catch (error) {
-      console.error('❌ Failed to initialize token manager:', error);
-      throw error;
+      // Ignore - credential might not exist in database
+    }
+  }
+
+  /**
+   * Save device auth credentials to database
+   */
+  async saveDeviceAuthToDatabase(
+    deviceId: string,
+    accountId: string,
+    deviceSecret: string,
+    displayName?: string
+  ): Promise<void> {
+    try {
+      await prisma.deviceAuthCredential.upsert({
+        where: { accountId },
+        create: {
+          deviceId,
+          accountId,
+          deviceSecret,
+          displayName,
+          isActive: true,
+          lastUsed: new Date(),
+        },
+        update: {
+          deviceId,
+          deviceSecret,
+          displayName,
+          isActive: true,
+          lastUsed: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+      console.log('[TokenManager] Device auth credentials saved to database');
+    } catch (error: any) {
+      console.error('[TokenManager] Failed to save credentials to database:', error.message);
     }
   }
 
@@ -66,7 +199,7 @@ class TokenManager {
     if (!this.tokenState) {
       await this.initialize();
       if (!this.tokenState) {
-        throw new Error('No valid token available. Device auth not configured.');
+        throw new Error(`No valid token available. ${this.lastError || 'Device auth not configured.'}`);
       }
     }
 
@@ -75,7 +208,7 @@ class TokenManager {
     const expiresAt = new Date(this.tokenState.expiresAt.getTime() - this.REFRESH_BUFFER_MS);
 
     if (now >= expiresAt) {
-      console.log('🔄 Token expired or expiring soon, refreshing...');
+      console.log('[TokenManager] Token expired or expiring soon, refreshing...');
       return this.refresh();
     }
 
@@ -94,6 +227,36 @@ class TokenManager {
    */
   isReady(): boolean {
     return this.initialized && this.tokenState !== null;
+  }
+
+  /**
+   * Get the last error message
+   */
+  getLastError(): string | null {
+    return this.lastError;
+  }
+
+  /**
+   * Get detailed status information
+   */
+  getStatus(): {
+    initialized: boolean;
+    hasToken: boolean;
+    accountId: string | null;
+    expiresAt: Date | null;
+    expiresInMs: number | null;
+    lastError: string | null;
+  } {
+    return {
+      initialized: this.initialized,
+      hasToken: this.tokenState !== null,
+      accountId: this.tokenState?.accountId || null,
+      expiresAt: this.tokenState?.expiresAt || null,
+      expiresInMs: this.tokenState
+        ? Math.max(0, this.tokenState.expiresAt.getTime() - Date.now())
+        : null,
+      lastError: this.lastError,
+    };
   }
 
   /**
@@ -137,45 +300,73 @@ class TokenManager {
       const now = new Date();
       if (now < this.tokenState.refreshExpiresAt) {
         try {
-          console.log('🔄 Refreshing token using refresh_token...');
+          console.log('[TokenManager] Refreshing token using refresh_token...');
           const response = await epicAuthService.refreshAccessToken(
             this.tokenState.refreshToken
           );
           this.updateTokenState(response);
-          console.log('✅ Token refreshed via refresh_token');
+          console.log('[TokenManager] Token refreshed via refresh_token');
           return this.tokenState!.accessToken;
-        } catch (error) {
-          console.warn('⚠️  Refresh token failed, falling back to device auth');
+        } catch (error: any) {
+          console.warn('[TokenManager] Refresh token failed, falling back to device auth:', error.message);
         }
       }
     }
 
     // Fallback to device auth
-    return this.refreshWithDeviceAuth();
+    const credentials = await this.getDeviceAuthCredentials();
+    if (!credentials) {
+      throw new Error('No device auth credentials available for refresh');
+    }
+
+    return this.refreshWithDeviceAuth(credentials);
   }
 
   /**
    * Refresh using device auth credentials
    */
-  private async refreshWithDeviceAuth(): Promise<string> {
-    const { deviceId, accountId, deviceSecret } = config.epic;
+  private async refreshWithDeviceAuth(credentials: DeviceAuthCredentials): Promise<string> {
+    console.log('[TokenManager] Getting token with device auth...');
+    console.log(`[TokenManager] Device ID: ${credentials.deviceId.substring(0, 8)}...`);
+    console.log(`[TokenManager] Account ID: ${credentials.accountId}`);
 
-    if (!deviceId || !accountId || !deviceSecret) {
-      throw new Error('Device auth credentials not configured');
+    try {
+      const response = await epicAuthService.getAccessTokenWithDeviceAuth(
+        credentials.deviceId,
+        credentials.accountId,
+        credentials.deviceSecret
+      );
+
+      this.updateTokenState(response);
+      this.lastError = null;
+      console.log('[TokenManager] Token obtained via device auth');
+
+      return this.tokenState!.accessToken;
+    } catch (error: any) {
+      // Log detailed error information
+      console.error('[TokenManager] Device auth failed:');
+      console.error(`  Status: ${error.response?.status || 'N/A'}`);
+      console.error(`  Message: ${error.message}`);
+
+      if (error.response?.data) {
+        console.error(`  Response: ${JSON.stringify(error.response.data)}`);
+      }
+
+      // Check for specific error codes
+      if (error.response?.status === 400) {
+        this.lastError = 'Device auth credentials are invalid or expired. Need to regenerate.';
+        console.error('[TokenManager] ' + this.lastError);
+        console.error('[TokenManager] Run: npm run generate-auth-manual');
+      } else if (error.response?.status === 401) {
+        this.lastError = 'Unauthorized - device auth credentials rejected';
+        console.error('[TokenManager] ' + this.lastError);
+      } else if (error.response?.status === 403) {
+        this.lastError = 'Forbidden - account may be banned or locked';
+        console.error('[TokenManager] ' + this.lastError);
+      }
+
+      throw error;
     }
-
-    console.log('🔐 Getting token with device auth...');
-
-    const response = await epicAuthService.getAccessTokenWithDeviceAuth(
-      deviceId,
-      accountId,
-      deviceSecret
-    );
-
-    this.updateTokenState(response);
-    console.log('✅ Token obtained via device auth');
-
-    return this.tokenState!.accessToken;
   }
 
   /**
@@ -195,7 +386,7 @@ class TokenManager {
     const expiresInMinutes = Math.round(
       (this.tokenState.expiresAt.getTime() - Date.now()) / 60000
     );
-    console.log(`📋 Token expires in ${expiresInMinutes} minutes`);
+    console.log(`[TokenManager] Token expires in ${expiresInMinutes} minutes`);
   }
 
   /**
@@ -215,13 +406,25 @@ class TokenManager {
       try {
         await epicAuthService.killSessions(this.tokenState.accessToken);
       } catch (error) {
-        console.warn('Failed to kill session:', error);
+        console.warn('[TokenManager] Failed to kill session:', error);
       }
     }
 
     this.tokenState = null;
     this.initialized = false;
-    console.log('🔒 Logged out and cleared token');
+    this.lastError = null;
+    console.log('[TokenManager] Logged out and cleared token');
+  }
+
+  /**
+   * Reset the token manager state (for reinitializing)
+   */
+  reset(): void {
+    this.tokenState = null;
+    this.initialized = false;
+    this.refreshPromise = null;
+    this.lastError = null;
+    console.log('[TokenManager] State reset');
   }
 }
 

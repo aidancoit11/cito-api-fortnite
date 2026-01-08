@@ -4,6 +4,18 @@ import * as authController from '../controllers/auth.controller.js';
 const router = Router();
 
 /**
+ * GET /auth/status
+ * Get the current Epic Games authentication status
+ */
+router.get('/status', authController.getAuthStatus);
+
+/**
+ * POST /auth/reinitialize
+ * Force reinitialize the token manager
+ */
+router.post('/reinitialize', authController.reinitialize);
+
+/**
  * POST /auth/device
  * Generate device auth credentials (one-time setup)
  */

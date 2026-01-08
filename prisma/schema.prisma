@@ -374,6 +374,21 @@ model GameTimeline {
   @@map("game_timeline")
 }
 
+// ===== DEVICE AUTH CREDENTIALS =====
+model DeviceAuthCredential {
+  id            String   @id @default(uuid())
+  accountId     String   @unique @map("account_id") @db.VarChar(255)
+  deviceId      String   @map("device_id") @db.VarChar(255)
+  deviceSecret  String   @map("device_secret") @db.VarChar(255)
+  displayName   String?  @map("display_name") @db.VarChar(255)
+  isActive      Boolean  @default(true) @map("is_active")
+  lastUsed      DateTime? @map("last_used")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @map("updated_at")
+
+  @@map("device_auth_credentials")
+}
+
 // ===== API KEYS =====
 model ApiKey {
   id         String    @id @default(uuid())

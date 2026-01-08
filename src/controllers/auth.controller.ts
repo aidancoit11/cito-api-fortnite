@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { epicAuthService } from '../services/epic/auth.service.js';
+import { tokenManager } from '../services/epic/token-manager.js';
 import { config } from '../config/index.js';
 
 /**
@@ -51,13 +52,25 @@ export async function generateDeviceAuth(req: Request, res: Response): Promise<v
       tokenResponse.account_id
     );
 
+    // Save to database for persistence
+    await tokenManager.saveDeviceAuthToDatabase(
+      deviceAuth.deviceId,
+      deviceAuth.accountId,
+      deviceAuth.secret,
+      tokenResponse.displayName
+    );
+
+    // Reset token manager to use new credentials
+    tokenManager.reset();
+
     // Return device auth credentials
     res.status(200).json({
       deviceId: deviceAuth.deviceId,
       accountId: deviceAuth.accountId,
       secret: deviceAuth.secret,
+      savedToDatabase: true,
       message:
-        'Device auth generated successfully! Add these to your .env file:\n\n' +
+        'Device auth generated and saved to database! Also add these to your .env file:\n\n' +
         `EPIC_DEVICE_ID=${deviceAuth.deviceId}\n` +
         `EPIC_ACCOUNT_ID=${deviceAuth.accountId}\n` +
         `EPIC_DEVICE_SECRET=${deviceAuth.secret}`,
@@ -170,6 +183,90 @@ export async function getAccessToken(req: Request, res: Response): Promise<void>
       error: 'Token retrieval failed',
       message,
       details: error.response?.data,
+    });
+  }
+}
+
+/**
+ * GET /auth/status
+ * Get the current authentication status
+ *
+ * Response:
+ * {
+ *   "initialized": true,
+ *   "hasToken": true,
+ *   "accountId": "...",
+ *   "expiresAt": "2024-01-01T12:00:00.000Z",
+ *   "expiresInMinutes": 240,
+ *   "lastError": null
+ * }
+ */
+export async function getAuthStatus(req: Request, res: Response): Promise<void> {
+  try {
+    const status = tokenManager.getStatus();
+
+    // Try to initialize if not ready
+    if (!status.initialized) {
+      console.log('[AuthController] Token manager not initialized, attempting initialization...');
+      await tokenManager.initialize();
+    }
+
+    const updatedStatus = tokenManager.getStatus();
+
+    res.status(200).json({
+      initialized: updatedStatus.initialized,
+      hasToken: updatedStatus.hasToken,
+      accountId: updatedStatus.accountId,
+      expiresAt: updatedStatus.expiresAt,
+      expiresInMinutes: updatedStatus.expiresInMs
+        ? Math.round(updatedStatus.expiresInMs / 60000)
+        : null,
+      lastError: updatedStatus.lastError,
+      envCredentialsConfigured: !!(config.epic.deviceId && config.epic.accountId && config.epic.deviceSecret),
+    });
+  } catch (error: any) {
+    console.error('Error getting auth status:', error);
+
+    res.status(500).json({
+      error: 'Failed to get auth status',
+      message: error.message,
+    });
+  }
+}
+
+/**
+ * POST /auth/reinitialize
+ * Force reinitialize the token manager
+ */
+export async function reinitialize(req: Request, res: Response): Promise<void> {
+  try {
+    console.log('[AuthController] Reinitializing token manager...');
+
+    tokenManager.reset();
+    await tokenManager.initialize();
+
+    const status = tokenManager.getStatus();
+
+    if (status.initialized && status.hasToken) {
+      res.status(200).json({
+        success: true,
+        message: 'Token manager reinitialized successfully',
+        ...status,
+        expiresInMinutes: status.expiresInMs ? Math.round(status.expiresInMs / 60000) : null,
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: 'Failed to reinitialize token manager',
+        lastError: status.lastError,
+      });
+    }
+  } catch (error: any) {
+    console.error('Error reinitializing:', error);
+
+    res.status(500).json({
+      error: 'Failed to reinitialize',
+      message: error.message,
     });
   }
 }

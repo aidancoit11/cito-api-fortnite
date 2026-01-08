@@ -84,19 +84,59 @@ export interface LiveTournament {
 
 /**
  * Make authenticated request to Epic Games API
+ * Handles auth failures gracefully
  */
-async function epicRequest<T>(url: string): Promise<T> {
-  const token = await tokenManager.getToken();
+async function epicRequest<T>(url: string, retries = 2): Promise<T> {
+  let lastError: Error | null = null;
 
-  const response = await axios.get<T>(url, {
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    timeout: 15000,
-  });
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const token = await tokenManager.getToken();
 
-  return response.data;
+      const response = await axios.get<T>(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      });
+
+      return response.data;
+    } catch (error: any) {
+      lastError = error;
+
+      // Log the error
+      const status = error.response?.status;
+      console.error(`[EpicEvents] Request failed (attempt ${attempt + 1}/${retries + 1}):`, {
+        url: url.substring(0, 100),
+        status,
+        message: error.message,
+      });
+
+      // If auth failed, try to reset and reinitialize token manager
+      if (status === 401 || status === 403) {
+        console.log('[EpicEvents] Auth error, resetting token manager...');
+        tokenManager.reset();
+
+        if (attempt < retries) {
+          await sleep(1000);
+          continue;
+        }
+      }
+
+      // Don't retry on other 4xx errors
+      if (status && status >= 400 && status < 500 && status !== 401 && status !== 403) {
+        break;
+      }
+
+      // Wait before retry
+      if (attempt < retries) {
+        await sleep(1000 * (attempt + 1));
+      }
+    }
+  }
+
+  throw lastError || new Error('Epic API request failed');
 }
 
 /**
