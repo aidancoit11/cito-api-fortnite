@@ -155,57 +155,73 @@ export async function getEnabledEvents(): Promise<EpicEvent[]> {
       throw new Error('No account ID available');
     }
 
-    const url = `${EVENTS_API_BASE}/api/v1/events/Fortnite/download/${accountId}`;
-    console.log('[EpicEvents] Fetching enabled events...');
+    // Fetch events for all regions
+    const regions = ['NAE', 'NAW', 'EU', 'BR', 'OCE', 'ASIA', 'ME'];
+    const allEvents: EpicEvent[] = [];
+
+    console.log('[EpicEvents] Fetching enabled events for all regions...');
     console.log(`[EpicEvents] Account ID: ${accountId} (length: ${accountId.length})`);
-    console.log(`[EpicEvents] URL: ${url}`);
 
-    const data = await epicRequest<any>(url);
-    console.log(`[EpicEvents] Got ${data?.events?.length || 0} events`);
+    for (const region of regions) {
+      try {
+        const url = `${EVENTS_API_BASE}/api/v1/events/Fortnite/download/${accountId}?region=${region}`;
+        console.log(`[EpicEvents] Fetching ${region}...`);
 
-    const events: EpicEvent[] = [];
+        const data = await epicRequest<any>(url);
+        console.log(`[EpicEvents] ${region}: ${data?.events?.length || 0} events`);
 
-    // Parse events from response
-    if (data.events && Array.isArray(data.events)) {
-      for (const event of data.events) {
-        const windows: EventWindow[] = [];
+        if (data?.events && Array.isArray(data.events)) {
+          // Process events from this region
+          for (const event of data.events) {
+            // Skip if we already have this event
+            if (allEvents.some(e => e.eventId === event.eventId)) continue;
 
-        if (event.eventWindows && Array.isArray(event.eventWindows)) {
-          for (const window of event.eventWindows) {
-            windows.push({
-              eventWindowId: window.eventWindowId,
+            const windows: EventWindow[] = [];
+
+            if (event.eventWindows && Array.isArray(event.eventWindows)) {
+              for (const window of event.eventWindows) {
+                windows.push({
+                  eventWindowId: window.eventWindowId,
+                  eventId: event.eventId,
+                  beginTime: new Date(window.beginTime),
+                  endTime: new Date(window.endTime),
+                  round: window.round || 1,
+                  scoreboardWindowEndTime: window.scoreboardWindowEndTime
+                    ? new Date(window.scoreboardWindowEndTime)
+                    : null,
+                  leaderboardId: window.leaderboardId || null,
+                  requireAllTokens: window.requireAllTokens || [],
+                  requireAnyTokens: window.requireAnyTokens || [],
+                  requireNoneTokens: window.requireNoneTokens || [],
+                });
+              }
+            }
+
+            allEvents.push({
               eventId: event.eventId,
-              beginTime: new Date(window.beginTime),
-              endTime: new Date(window.endTime),
-              round: window.round || 1,
-              scoreboardWindowEndTime: window.scoreboardWindowEndTime
-                ? new Date(window.scoreboardWindowEndTime)
-                : null,
-              leaderboardId: window.leaderboardId || null,
-              requireAllTokens: window.requireAllTokens || [],
-              requireAnyTokens: window.requireAnyTokens || [],
-              requireNoneTokens: window.requireNoneTokens || [],
+              displayDataId: event.displayDataId || event.eventId,
+              name: event.displayDataId || event.eventId,
+              description: event.longFormatTitle || null,
+              regions: event.regions || [region],
+              eventWindows: windows,
+              metadata: {
+                minimumAccountLevel: event.minimumAccountLevel,
+                scoreLocationId: event.scoreLocationId,
+              },
             });
           }
         }
 
-        events.push({
-          eventId: event.eventId,
-          displayDataId: event.displayDataId || event.eventId,
-          name: event.displayDataId || event.eventId,
-          description: event.longFormatTitle || null,
-          regions: event.regions || [],
-          eventWindows: windows,
-          metadata: {
-            minimumAccountLevel: event.minimumAccountLevel,
-            scoreLocationId: event.scoreLocationId,
-          },
-        });
+        // Small delay between requests
+        await sleep(200);
+      } catch (regionError: any) {
+        console.warn(`[EpicEvents] Failed to fetch ${region}: ${regionError.message}`);
       }
     }
 
-    cache.set(cacheKey, events);
-    return events;
+    console.log(`[EpicEvents] Total unique events: ${allEvents.length}`);
+    cache.set(cacheKey, allEvents);
+    return allEvents;
   } catch (error: any) {
     console.error('Failed to get enabled events:', error.message);
     return [];
