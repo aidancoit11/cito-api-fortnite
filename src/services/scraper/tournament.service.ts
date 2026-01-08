@@ -314,7 +314,7 @@ function parseGridRow($: cheerio.CheerioAPI, $row: any): ScrapedTournament | nul
 /**
  * Parse divRow format (alternative table structure)
  */
-function parseDivRow($: cheerio.CheerioAPI, $row: any): ScrapedTournament | null {
+function parseDivRow(_$: cheerio.CheerioAPI, $row: any): ScrapedTournament | null {
   const link = $row.find('a[href*="/fortnite/"]').first();
   const href = link.attr('href');
   const name = link.text().trim() || link.attr('title');
@@ -497,7 +497,7 @@ async function scrapeTournamentsFromPage(url: string): Promise<ScrapedTournament
 function parseTournamentTableRow(
   $: cheerio.CheerioAPI,
   $row: any,
-  cells: any
+  _cells: any
 ): ScrapedTournament | null {
   const tournamentLink = $row.find('a[href*="/fortnite/"]').filter((_: number, el: any) => {
     const href = $(el).attr('href') || '';
@@ -614,8 +614,10 @@ export async function scrapeTournamentDetails(wikiUrl: string): Promise<Tourname
     // Determine status
     const now = new Date();
     let status: 'upcoming' | 'ongoing' | 'completed' = 'completed';
-    if (startDate && startDate > now) status = 'upcoming';
-    else if (endDate && endDate >= now && startDate && startDate <= now) status = 'ongoing';
+    const sd = startDate as Date | null;
+    const ed = endDate as Date | null;
+    if (sd && sd > now) status = 'upcoming';
+    else if (ed && sd && ed >= now && sd <= now) status = 'ongoing';
 
     // Scrape results (top 500 placements)
     const results = scrapeTournamentResults($);
@@ -843,7 +845,7 @@ function parseResultsTableRow(
  * Parse bracket result
  */
 function parseBracketResult(
-  $: cheerio.CheerioAPI,
+  _$: cheerio.CheerioAPI,
   $el: any,
   seenPlayers: Set<string>
 ): TournamentPlacement | null {
@@ -1275,8 +1277,8 @@ export async function getTournamentResults(
 
       if (data?.linkedPlayerId) {
         player = await prisma.player.findUnique({
-          where: { accountId: data.linkedPlayerId },
-          select: { accountId: true, displayName: true, avatarUrl: true },
+          where: { playerId: data.linkedPlayerId },
+          select: { playerId: true, currentIgn: true, imageUrl: true },
         });
       }
 
@@ -1399,7 +1401,7 @@ function parseTier(text: string): string | null {
   return null;
 }
 
-function parseTierFromCell($cell: any, $: cheerio.CheerioAPI): string | null {
+function parseTierFromCell($cell: any, _$: cheerio.CheerioAPI): string | null {
   const text = $cell.text().toLowerCase();
   const link = $cell.find('a').first();
   const title = link.attr('title')?.toLowerCase() || '';
@@ -1412,7 +1414,7 @@ function parseTierFromCell($cell: any, $: cheerio.CheerioAPI): string | null {
   return parseTier(text);
 }
 
-function parseRegionFromCell($cell: any, $: cheerio.CheerioAPI): string | null {
+function parseRegionFromCell($cell: any, _$: cheerio.CheerioAPI): string | null {
   const text = $cell.text();
   const flagImg = $cell.find('img[alt]').first();
   const alt = flagImg.attr('alt') || '';
@@ -1519,7 +1521,7 @@ function parseKills(text: string): number | null {
   return match && match[1] ? parseInt(match[1], 10) : null;
 }
 
-function parseTeamNameFromRow($: cheerio.CheerioAPI, $row: any): string | null {
+function parseTeamNameFromRow(_$: cheerio.CheerioAPI, $row: any): string | null {
   // Look for team template
   const teamSpan = $row.find('.team-template-text, [data-highlighting-class]').first();
   if (teamSpan.length) {

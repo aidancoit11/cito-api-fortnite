@@ -3,7 +3,7 @@
  * Handles rotating proxies and automatic backoff when rate limited
  */
 
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
 
 export interface ProxyConfig {
   host: string;
@@ -49,7 +49,7 @@ class ProxyManager {
 
     for (const proxyStr of proxyList) {
       const parts = proxyStr.trim().split(':');
-      if (parts.length >= 2) {
+      if (parts.length >= 2 && parts[0] && parts[1]) {
         const proxy: ProxyConfig = {
           host: parts[0],
           port: parseInt(parts[1], 10),
@@ -79,7 +79,7 @@ class ProxyManager {
 
     while (attempts < this.proxies.length) {
       this.currentIndex = (this.currentIndex + 1) % this.proxies.length;
-      const state = this.proxies[this.currentIndex];
+      const state = this.proxies[this.currentIndex]!;
 
       // Skip if rate limited
       if (state.rateLimitedUntil > now) {
@@ -99,7 +99,7 @@ class ProxyManager {
     // All proxies rate limited - return the one that will be available soonest
     return this.proxies.reduce((min, p) =>
       p.rateLimitedUntil < min.rateLimitedUntil ? p : min
-    );
+    ) ?? null;
   }
 
   /**

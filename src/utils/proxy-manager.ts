@@ -85,7 +85,10 @@ class ProxyManager {
     for (const line of lines) {
       const parts = line.split(':');
       if (parts.length === 4) {
-        const [host, portStr, username, password] = parts;
+        const host = parts[0]!;
+        const portStr = parts[1]!;
+        const username = parts[2]!;
+        const password = parts[3]!;
         const port = parseInt(portStr, 10);
         const url = `http://${username}:${password}@${host}:${port}`;
 
@@ -124,7 +127,7 @@ class ProxyManager {
       return null;
     }
 
-    const proxy = this.proxies[this.currentIndex];
+    const proxy = this.proxies[this.currentIndex]!;
     this.currentIndex = (this.currentIndex + 1) % this.proxies.length;
     return proxy;
   }
@@ -138,7 +141,7 @@ class ProxyManager {
     }
 
     const index = Math.floor(Math.random() * this.proxies.length);
-    return this.proxies[index];
+    return this.proxies[index] ?? null;
   }
 
   /**
