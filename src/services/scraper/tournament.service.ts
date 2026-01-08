@@ -1024,22 +1024,27 @@ async function linkResultToPlayerAndOrg(result: TournamentPlacement): Promise<{
     const player = await prisma.player.findFirst({
       where: {
         OR: [
-          { displayName: { equals: result.playerName, mode: 'insensitive' } },
-          { displayName: { contains: result.playerName, mode: 'insensitive' } },
+          { currentIgn: { equals: result.playerName, mode: 'insensitive' } },
+          { currentIgn: { contains: result.playerName, mode: 'insensitive' } },
         ],
       },
       include: {
-        currentOrg: true,
+        rosterHistory: {
+          where: { isActive: true },
+          include: { organization: true },
+          take: 1,
+        },
       },
     });
 
     if (player) {
-      playerId = player.accountId;
+      playerId = player.playerId;
 
-      // If player has an org, use it
-      if (player.currentOrg) {
-        orgSlug = player.currentOrg.slug;
-        orgName = player.currentOrg.name;
+      // If player has an active org roster, use it
+      const activeRoster = player.rosterHistory?.[0];
+      if (activeRoster?.organization) {
+        orgSlug = activeRoster.organization.slug;
+        orgName = activeRoster.organization.name;
       }
     }
 
