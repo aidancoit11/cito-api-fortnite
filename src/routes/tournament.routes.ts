@@ -50,6 +50,20 @@ router.post('/sync-live', tournamentController.syncLiveEvents);
 router.get('/live/:eventId/:windowId', tournamentController.getLiveEventLeaderboard);
 
 /**
+ * GET /tournaments/player/:identifier/history
+ * Get player's tournament history across all tournaments
+ * Query params: limit
+ */
+router.get('/player/:identifier/history', tournamentController.getPlayerTournamentHistory);
+
+/**
+ * GET /tournaments/org/:slug/history
+ * Get organization's tournament history (all players from that org)
+ * Query params: limit
+ */
+router.get('/org/:slug/history', tournamentController.getOrgTournamentHistory);
+
+/**
  * GET /tournaments/:id
  * Get tournament details with top results
  */

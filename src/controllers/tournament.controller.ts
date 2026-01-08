@@ -641,3 +641,120 @@ export async function syncLiveEvents(_req: Request, res: Response, next: NextFun
     next(error);
   }
 }
+
+/**
+ * GET /tournaments/player/:identifier/history
+ * Get player's tournament history across all tournaments
+ */
+export async function getPlayerTournamentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { identifier } = req.params;
+    const { limit = '50' } = req.query;
+
+    if (!identifier) {
+      res.status(400).json({ success: false, error: 'Player identifier is required' });
+      return;
+    }
+
+    const results = await tournamentService.getPlayerTournamentHistory(identifier, {
+      limit: parseInt(limit as string, 10),
+    });
+
+    // Calculate summary stats
+    const totalEarnings = results.reduce((sum, r) => sum + (r.earnings || 0), 0);
+    const avgPlacement = results.length > 0
+      ? results.reduce((sum, r) => sum + r.rank, 0) / results.length
+      : 0;
+    const bestPlacement = results.length > 0
+      ? Math.min(...results.map(r => r.rank))
+      : null;
+    const wins = results.filter(r => r.rank === 1).length;
+
+    res.json({
+      success: true,
+      count: results.length,
+      data: {
+        playerIdentifier: identifier,
+        summary: {
+          totalTournaments: results.length,
+          totalEarnings,
+          avgPlacement: Math.round(avgPlacement * 10) / 10,
+          bestPlacement,
+          wins,
+        },
+        tournaments: results.map(r => ({
+          tournamentId: r.tournament?.tournamentId,
+          tournamentName: r.tournament?.name,
+          startDate: r.tournament?.startDate,
+          region: r.tournament?.region,
+          prizePool: r.tournament?.prizePool,
+          rank: r.rank,
+          points: r.points,
+          kills: r.kills,
+          earnings: r.earnings,
+          teamName: r.teamName,
+          linkedOrg: (r.data as any)?.linkedOrgSlug || null,
+        })),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /tournaments/org/:slug/history
+ * Get organization's tournament history (all players from that org)
+ */
+export async function getOrgTournamentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { slug } = req.params;
+    const { limit = '100' } = req.query;
+
+    if (!slug) {
+      res.status(400).json({ success: false, error: 'Organization slug is required' });
+      return;
+    }
+
+    const results = await tournamentService.getOrgTournamentHistory(slug, {
+      limit: parseInt(limit as string, 10),
+    });
+
+    // Calculate summary stats
+    const totalEarnings = results.reduce((sum, r) => sum + (r.earnings || 0), 0);
+    const uniqueTournaments = new Set(results.map(r => r.tournamentId)).size;
+    const uniquePlayers = new Set(results.map(r => r.displayName.toLowerCase())).size;
+    const wins = results.filter(r => r.rank === 1).length;
+    const topTens = results.filter(r => r.rank <= 10).length;
+
+    res.json({
+      success: true,
+      count: results.length,
+      data: {
+        orgSlug: slug,
+        summary: {
+          totalPlacements: results.length,
+          uniqueTournaments,
+          uniquePlayers,
+          totalEarnings,
+          wins,
+          topTenPlacements: topTens,
+        },
+        placements: results.map(r => ({
+          tournamentId: r.tournament?.tournamentId,
+          tournamentName: r.tournament?.name,
+          startDate: r.tournament?.startDate,
+          region: r.tournament?.region,
+          prizePool: r.tournament?.prizePool,
+          playerName: r.displayName,
+          rank: r.rank,
+          points: r.points,
+          kills: r.kills,
+          earnings: r.earnings,
+        })),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}

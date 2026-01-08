@@ -2,6 +2,7 @@
  * Tournament Scraping Service
  * Scrapes ALL Fortnite tournaments from Liquipedia
  * Handles: historical tournaments, results, top 500 placements
+ * Links results to existing players/orgs in database
  */
 
 import axios from 'axios';
@@ -48,6 +49,7 @@ export interface ScrapedTournament {
   status: 'upcoming' | 'ongoing' | 'completed';
   wikiUrl: string;
   logoUrl: string | null;
+  participantCount: number | null;
 }
 
 export interface TournamentDetails extends ScrapedTournament {
@@ -55,7 +57,6 @@ export interface TournamentDetails extends ScrapedTournament {
   venue: string | null;
   gameMode: string | null;
   teamSize: number | null;
-  participantCount: number | null;
   results: TournamentPlacement[];
 }
 
@@ -70,63 +71,99 @@ export interface TournamentPlacement {
   teamMembers: string[] | null;
 }
 
+// ============ MAJOR TOURNAMENT SERIES ============
+
+const MAJOR_TOURNAMENT_SERIES = [
+  'Fortnite_Champion_Series', // FNCS (main competitive series)
+  'Fortnite_World_Cup',
+  'FNCS_Global_Championship',
+  'FNCS_Invitational',
+  'Cash_Cup',
+  'Champion_Cash_Cup',
+  'Contender_Cash_Cup',
+  'DreamHack',
+  'Twitch_Rivals',
+  'Elite_Cup',
+  'Reload_Elite_Series',
+];
+
+// Years to scrape for historical data
+const HISTORICAL_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026];
+
 // ============ SCRAPING FUNCTIONS ============
 
 /**
- * Scrape all tournaments from Liquipedia Portal
- * Gets tournaments from multiple year pages for complete history
+ * Scrape all tournaments from Liquipedia Portal using correct CSS selectors
  */
 export async function scrapeAllTournaments(options?: {
   years?: number[];
   limit?: number;
+  includeSeriesPages?: boolean;
 }): Promise<ScrapedTournament[]> {
-  const { years, limit } = options || {};
-
-  // Default to all years from 2018 to current
-  const currentYear = new Date().getFullYear();
-  const targetYears = years || Array.from(
-    { length: currentYear - 2017 },
-    (_, i) => 2018 + i
-  );
+  const { limit, includeSeriesPages = true } = options || {};
 
   const allTournaments: ScrapedTournament[] = [];
   const seenSlugs = new Set<string>();
 
-  console.log(`Scraping tournaments for years: ${targetYears.join(', ')}`);
-
-  for (const year of targetYears) {
-    try {
-      const yearTournaments = await scrapeTournamentsForYear(year);
-
-      for (const tournament of yearTournaments) {
-        if (!seenSlugs.has(tournament.slug)) {
-          seenSlugs.add(tournament.slug);
-          allTournaments.push(tournament);
-
-          if (limit && allTournaments.length >= limit) {
-            return allTournaments;
-          }
-        }
-      }
-
-      // Delay between years to be respectful
-      await sleep(300);
-    } catch (error: any) {
-      console.error(`Failed to scrape tournaments for ${year}:`, error.message);
-    }
-  }
-
-  // Also scrape the main tournaments portal for any we missed
+  // 1. Scrape main Portal:Tournaments page (uses gridTable structure)
+  console.log('Scraping Portal:Tournaments...');
   try {
     const portalTournaments = await scrapeTournamentsPortal();
     for (const tournament of portalTournaments) {
       if (!seenSlugs.has(tournament.slug)) {
         seenSlugs.add(tournament.slug);
         allTournaments.push(tournament);
+        if (limit && allTournaments.length >= limit) return allTournaments;
       }
     }
+    console.log(`Found ${portalTournaments.length} tournaments from portal`);
   } catch (error: any) {
-    console.error('Failed to scrape tournaments portal:', error.message);
+    console.error('Failed to scrape portal:', error.message);
+  }
+
+  // 2. Scrape major tournament series pages for historical data
+  if (includeSeriesPages) {
+    for (const series of MAJOR_TOURNAMENT_SERIES) {
+      try {
+        console.log(`Scraping series: ${series}...`);
+        const seriesTournaments = await scrapeTournamentSeriesPage(series);
+
+        for (const tournament of seriesTournaments) {
+          if (!seenSlugs.has(tournament.slug)) {
+            seenSlugs.add(tournament.slug);
+            allTournaments.push(tournament);
+            if (limit && allTournaments.length >= limit) return allTournaments;
+          }
+        }
+        console.log(`Found ${seriesTournaments.length} tournaments from ${series}`);
+        await sleep(300); // Rate limit
+      } catch (error: any) {
+        console.error(`Failed to scrape ${series}:`, error.message);
+      }
+    }
+
+    // 3. Scrape FNCS by year (main source of historical tournaments)
+    for (const year of HISTORICAL_YEARS) {
+      try {
+        const fncsYearUrl = `${LIQUIPEDIA_FORTNITE}/Fortnite_Champion_Series/${year}`;
+        console.log(`Scraping FNCS ${year}...`);
+        const yearTournaments = await scrapeTournamentsFromPage(fncsYearUrl);
+
+        for (const tournament of yearTournaments) {
+          if (!seenSlugs.has(tournament.slug)) {
+            seenSlugs.add(tournament.slug);
+            allTournaments.push(tournament);
+          }
+        }
+        console.log(`Found ${yearTournaments.length} tournaments from FNCS ${year}`);
+        await sleep(300);
+      } catch (error: any) {
+        // FNCS didn't exist before 2019, ignore 404s
+        if (!error.message?.includes('404')) {
+          console.error(`Failed to scrape FNCS ${year}:`, error.message);
+        }
+      }
+    }
   }
 
   console.log(`Total tournaments found: ${allTournaments.length}`);
@@ -134,60 +171,7 @@ export async function scrapeAllTournaments(options?: {
 }
 
 /**
- * Scrape tournaments for a specific year
- */
-async function scrapeTournamentsForYear(year: number): Promise<ScrapedTournament[]> {
-  const cacheKey = `tournaments_${year}`;
-  const cached = cache.get<ScrapedTournament[]>(cacheKey);
-  if (cached) return cached;
-
-  const url = `${LIQUIPEDIA_FORTNITE}/Tournaments/${year}`;
-  console.log(`Fetching: ${url}`);
-
-  try {
-    const html = await fetchWithProxy(url);
-    const $ = cheerio.load(html);
-    const tournaments: ScrapedTournament[] = [];
-
-    // Process tournament tables
-    $('table.wikitable').each((_, table) => {
-      const $table = $(table);
-
-      $table.find('tbody tr').each((_, row) => {
-        const $row = $(row);
-        const cells = $row.find('td');
-
-        if (cells.length < 3) return;
-
-        const tournament = parseTournamentRow($, $row, cells);
-        if (tournament) {
-          tournaments.push(tournament);
-        }
-      });
-    });
-
-    // Also look for tournament grids/divs
-    $('.tournament-card, .gridRow, [class*="tournament"]').each((_, el) => {
-      const tournament = parseTournamentElement($, $(el));
-      if (tournament && !tournaments.find(t => t.slug === tournament.slug)) {
-        tournaments.push(tournament);
-      }
-    });
-
-    cache.set(cacheKey, tournaments);
-    console.log(`Found ${tournaments.length} tournaments for ${year}`);
-    return tournaments;
-  } catch (error: any) {
-    if (error.response?.status === 404) {
-      console.log(`No tournaments page for ${year}`);
-      return [];
-    }
-    throw error;
-  }
-}
-
-/**
- * Scrape main tournaments portal
+ * Scrape main tournaments portal - uses gridTable.tournamentCard structure
  */
 async function scrapeTournamentsPortal(): Promise<ScrapedTournament[]> {
   const cacheKey = 'tournaments_portal';
@@ -201,58 +185,30 @@ async function scrapeTournamentsPortal(): Promise<ScrapedTournament[]> {
   const $ = cheerio.load(html);
   const tournaments: ScrapedTournament[] = [];
 
-  // Process all tournament links on the portal
-  $('a[href*="/fortnite/"]').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') || '';
-    const name = $el.text().trim();
+  // Parse gridTable tournamentCard structure (current Liquipedia format)
+  $('.gridTable.tournamentCard').each((_, table) => {
+    const $table = $(table);
 
-    // Skip non-tournament links
-    if (!href ||
-        href.includes('Portal:') ||
-        href.includes('Category:') ||
-        href.includes('Player_Transfers') ||
-        href.includes('Teams') ||
-        !name ||
-        name.length < 3) {
-      return;
-    }
-
-    // Check if this looks like a tournament
-    const isTournament =
-      href.includes('Cup') ||
-      href.includes('Championship') ||
-      href.includes('Tournament') ||
-      href.includes('Series') ||
-      href.includes('Finals') ||
-      href.includes('FNCS') ||
-      href.includes('World_Cup') ||
-      href.includes('Cash_Cup') ||
-      href.includes('Champion');
-
-    if (isTournament) {
-      const slug = href.split('/fortnite/')[1]?.replace(/\//g, '-').toLowerCase()
-        .replace(/[^a-z0-9-]/g, '')
-        .replace(/--+/g, '-')
-        .replace(/^-|-$/g, '');
-
-      if (slug && slug.length > 2 && !tournaments.find(t => t.slug === slug)) {
-        tournaments.push({
-          slug,
-          name,
-          tier: null,
-          startDate: null,
-          endDate: null,
-          prizePool: null,
-          region: null,
-          format: null,
-          organizer: null,
-          status: 'completed',
-          wikiUrl: `${LIQUIPEDIA_BASE}${href}`,
-          logoUrl: null,
-        });
+    // Process each gridRow
+    $table.find('.gridRow').each((_, row) => {
+      const $row = $(row);
+      const tournament = parseGridRow($, $row);
+      if (tournament && !tournaments.find(t => t.slug === tournament.slug)) {
+        tournaments.push(tournament);
       }
-    }
+    });
+  });
+
+  // Also process any divTable structure (alternative format)
+  $('.divTable').each((_, table) => {
+    const $table = $(table);
+    $table.find('.divRow').each((_, row) => {
+      const $row = $(row);
+      const tournament = parseDivRow($, $row);
+      if (tournament && !tournaments.find(t => t.slug === tournament.slug)) {
+        tournaments.push(tournament);
+      }
+    });
   });
 
   cache.set(cacheKey, tournaments);
@@ -260,55 +216,66 @@ async function scrapeTournamentsPortal(): Promise<ScrapedTournament[]> {
 }
 
 /**
- * Parse tournament from table row
+ * Parse a gridRow from the tournament portal
  */
-function parseTournamentRow(
-  $: cheerio.CheerioAPI,
-  $row: any,
-  cells: any
-): ScrapedTournament | null {
-  // Find tournament link
-  const tournamentLink = $row.find('a[href*="/fortnite/"]').filter((_: number, el: any) => {
+function parseGridRow($: cheerio.CheerioAPI, $row: any): ScrapedTournament | null {
+  // Find tournament link in the Tournament cell
+  const tournamentCell = $row.find('.gridCell.Tournament');
+  const tournamentLink = tournamentCell.find('a[href*="/fortnite/"]').filter((_: number, el: any) => {
     const href = $(el).attr('href') || '';
-    return !href.includes('Portal:') &&
-           !href.includes('Category:') &&
-           !href.includes('Player_Transfers');
-  }).first();
+    return !href.includes('Category:') && !href.includes('Portal:');
+  }).last(); // Last link is usually the specific tournament
 
   if (!tournamentLink.length) return null;
 
   const href = tournamentLink.attr('href') || '';
-  const name = tournamentLink.text().trim() || tournamentLink.attr('title') || '';
+  const name = tournamentLink.attr('title') || tournamentLink.text().trim();
 
   if (!name || name.length < 3) return null;
 
-  const slug = createSlug(name);
+  const slug = createSlug(href.split('/fortnite/')[1] || name);
 
-  // Parse tier from first column or class
-  let tier: string | null = null;
-  const tierCell = cells.eq(0).text().trim().toLowerCase();
-  if (tierCell.includes('s-tier') || tierCell.includes('premier')) tier = 'S';
-  else if (tierCell.includes('a-tier') || tierCell.includes('major')) tier = 'A';
-  else if (tierCell.includes('b-tier') || tierCell.includes('minor')) tier = 'B';
-  else if (tierCell.includes('c-tier') || tierCell.includes('weekly')) tier = 'C';
-  else if (tierCell.includes('monthly')) tier = 'Monthly';
-  else if (tierCell.includes('show') || tierCell.includes('showmatch')) tier = 'Showmatch';
+  // Parse tier
+  const tierCell = $row.find('.gridCell.Tier');
+  const tier = parseTierFromCell(tierCell, $);
 
-  // Parse dates
-  const dateText = $row.find('td').map((_: number, cell: any) => $(cell).text()).get().join(' ');
+  // Parse date
+  const dateCell = $row.find('.gridCell.Date');
+  const dateText = dateCell.text().trim();
   const { startDate, endDate } = parseDateRange(dateText);
 
   // Parse prize pool
-  const prizePool = parsePrizePool($row.text());
+  const prizeCell = $row.find('.gridCell.Prize');
+  const prizePool = parsePrizePool(prizeCell.text());
 
-  // Parse region
-  const region = parseRegion($row.text());
+  // Parse region/location
+  const locationCell = $row.find('.gridCell.Location');
+  const region = parseRegionFromCell(locationCell, $);
+
+  // Parse participant count
+  const participantCell = $row.find('.gridCell.PlayerNumber');
+  const participantCount = parseParticipantCount(participantCell.text());
+
+  // Get logo URL
+  const logoImg = tournamentCell.find('img').first();
+  let logoUrl: string | null = null;
+  const logoSrc = logoImg.attr('src') || logoImg.attr('data-src');
+  if (logoSrc && !logoSrc.includes('placeholder')) {
+    logoUrl = logoSrc.startsWith('http') ? logoSrc : `${LIQUIPEDIA_BASE}${logoSrc}`;
+  }
 
   // Determine status
   const now = new Date();
   let status: 'upcoming' | 'ongoing' | 'completed' = 'completed';
   if (startDate && startDate > now) status = 'upcoming';
   else if (endDate && endDate >= now && startDate && startDate <= now) status = 'ongoing';
+
+  // Check for TBD winner to determine if upcoming/ongoing
+  const winnerCell = $row.find('.gridCell.FirstPlace');
+  if (winnerCell.text().includes('TBD')) {
+    if (startDate && startDate > now) status = 'upcoming';
+    else status = 'ongoing';
+  }
 
   return {
     slug,
@@ -319,29 +286,27 @@ function parseTournamentRow(
     prizePool,
     region,
     format: null,
-    organizer: null,
+    organizer: 'Epic Games',
     status,
     wikiUrl: `${LIQUIPEDIA_BASE}${href}`,
-    logoUrl: null,
+    logoUrl,
+    participantCount,
   };
 }
 
 /**
- * Parse tournament from div/card element
+ * Parse divRow format (alternative table structure)
  */
-function parseTournamentElement(
-  _$: cheerio.CheerioAPI,
-  $el: any
-): ScrapedTournament | null {
-  const link = $el.find('a[href*="/fortnite/"]').first();
+function parseDivRow($: cheerio.CheerioAPI, $row: any): ScrapedTournament | null {
+  const link = $row.find('a[href*="/fortnite/"]').first();
   const href = link.attr('href');
-  const name = link.text().trim() || link.attr('title') || '';
+  const name = link.text().trim() || link.attr('title');
 
   if (!href || !name || name.length < 3) return null;
   if (href.includes('Portal:') || href.includes('Category:')) return null;
 
-  const slug = createSlug(name);
-  const text = $el.text();
+  const slug = createSlug(href.split('/fortnite/')[1] || name);
+  const text = $row.text();
 
   return {
     slug,
@@ -356,11 +321,201 @@ function parseTournamentElement(
     status: 'completed',
     wikiUrl: `${LIQUIPEDIA_BASE}${href}`,
     logoUrl: null,
+    participantCount: null,
   };
 }
 
 /**
- * Scrape detailed tournament info and results
+ * Scrape a tournament series main page (e.g., FNCS main page)
+ */
+async function scrapeTournamentSeriesPage(seriesName: string): Promise<ScrapedTournament[]> {
+  const url = `${LIQUIPEDIA_FORTNITE}/${seriesName}`;
+
+  try {
+    const html = await fetchWithProxy(url);
+    const $ = cheerio.load(html);
+    const tournaments: ScrapedTournament[] = [];
+
+    // Look for tournament links in navigation boxes, tables, etc.
+    $('a[href*="/fortnite/"]').each((_, el) => {
+      const $el = $(el);
+      const href = $el.attr('href') || '';
+      const name = $el.text().trim() || $el.attr('title') || '';
+
+      // Skip non-tournament links
+      if (!href ||
+          href.includes('Category:') ||
+          href.includes('Portal:') ||
+          href.includes('Player_Transfers') ||
+          href === `/fortnite/${seriesName}` ||
+          name.length < 5) {
+        return;
+      }
+
+      // Check if looks like a tournament event
+      const isTournament =
+        href.includes('Major') ||
+        href.includes('Finals') ||
+        href.includes('Grand_Finals') ||
+        href.includes('Invitational') ||
+        href.includes('Championship') ||
+        href.includes('Week') ||
+        href.includes('Round') ||
+        href.includes('Qualifier') ||
+        href.includes('Season') ||
+        href.includes('Chapter');
+
+      if (isTournament) {
+        const slug = createSlug(href.split('/fortnite/')[1] || name);
+
+        if (!tournaments.find(t => t.slug === slug)) {
+          tournaments.push({
+            slug,
+            name,
+            tier: seriesName.includes('Champion') ? 'S' : 'A',
+            startDate: null,
+            endDate: null,
+            prizePool: null,
+            region: parseRegion(name),
+            format: null,
+            organizer: 'Epic Games',
+            status: 'completed',
+            wikiUrl: `${LIQUIPEDIA_BASE}${href}`,
+            logoUrl: null,
+            participantCount: null,
+          });
+        }
+      }
+    });
+
+    return tournaments;
+  } catch (error: any) {
+    if (error.response?.status === 404) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+/**
+ * Scrape tournaments from any Liquipedia page
+ */
+async function scrapeTournamentsFromPage(url: string): Promise<ScrapedTournament[]> {
+  try {
+    const html = await fetchWithProxy(url);
+    const $ = cheerio.load(html);
+    const tournaments: ScrapedTournament[] = [];
+
+    // Parse gridTable structure
+    $('.gridTable.tournamentCard .gridRow, .gridTable .gridRow').each((_, row) => {
+      const $row = $(row);
+      const tournament = parseGridRow($, $row);
+      if (tournament && !tournaments.find(t => t.slug === tournament.slug)) {
+        tournaments.push(tournament);
+      }
+    });
+
+    // Parse wikitable structure
+    $('table.wikitable tbody tr').each((_, row) => {
+      const $row = $(row);
+      const cells = $row.find('td');
+      if (cells.length < 2) return;
+
+      const tournament = parseTournamentTableRow($, $row, cells);
+      if (tournament && !tournaments.find(t => t.slug === tournament.slug)) {
+        tournaments.push(tournament);
+      }
+    });
+
+    // Find tournament links in content
+    $('.mw-parser-output a[href*="/fortnite/"]').each((_, el) => {
+      const $el = $(el);
+      const href = $el.attr('href') || '';
+      const name = $el.text().trim();
+
+      if (!href || href.includes('Category:') || href.includes('Portal:') || !name) return;
+
+      // Check if this looks like a tournament
+      const isTournament =
+        href.includes('Finals') ||
+        href.includes('Major') ||
+        href.includes('Grand_Finals') ||
+        href.includes('Week_') ||
+        (href.includes('FNCS') && !href.includes('Fortnite_Champion_Series/'));
+
+      if (isTournament) {
+        const slug = createSlug(href.split('/fortnite/')[1] || name);
+        if (!tournaments.find(t => t.slug === slug)) {
+          tournaments.push({
+            slug,
+            name,
+            tier: 'A',
+            startDate: null,
+            endDate: null,
+            prizePool: null,
+            region: parseRegion(name) || parseRegion(href),
+            format: null,
+            organizer: 'Epic Games',
+            status: 'completed',
+            wikiUrl: `${LIQUIPEDIA_BASE}${href}`,
+            logoUrl: null,
+            participantCount: null,
+          });
+        }
+      }
+    });
+
+    return tournaments;
+  } catch (error: any) {
+    if (error.response?.status === 404) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+/**
+ * Parse tournament from wikitable row
+ */
+function parseTournamentTableRow(
+  $: cheerio.CheerioAPI,
+  $row: any,
+  cells: any
+): ScrapedTournament | null {
+  const tournamentLink = $row.find('a[href*="/fortnite/"]').filter((_: number, el: any) => {
+    const href = $(el).attr('href') || '';
+    return !href.includes('Portal:') && !href.includes('Category:');
+  }).first();
+
+  if (!tournamentLink.length) return null;
+
+  const href = tournamentLink.attr('href') || '';
+  const name = tournamentLink.text().trim() || tournamentLink.attr('title') || '';
+
+  if (!name || name.length < 3) return null;
+
+  const slug = createSlug(href.split('/fortnite/')[1] || name);
+  const rowText = $row.text();
+
+  return {
+    slug,
+    name,
+    tier: parseTier(rowText),
+    startDate: parseDateRange(rowText).startDate,
+    endDate: parseDateRange(rowText).endDate,
+    prizePool: parsePrizePool(rowText),
+    region: parseRegion(rowText),
+    format: null,
+    organizer: null,
+    status: 'completed',
+    wikiUrl: `${LIQUIPEDIA_BASE}${href}`,
+    logoUrl: null,
+    participantCount: null,
+  };
+}
+
+/**
+ * Scrape detailed tournament info and results (top 500)
  */
 export async function scrapeTournamentDetails(wikiUrl: string): Promise<TournamentDetails | null> {
   const cacheKey = `tournament_details_${wikiUrl}`;
@@ -377,7 +532,7 @@ export async function scrapeTournamentDetails(wikiUrl: string): Promise<Tourname
                  $('.firstHeading').text().trim();
     const slug = createSlug(name);
 
-    // Parse infobox
+    // Parse infobox for tournament metadata
     let tier: string | null = null;
     let startDate: Date | null = null;
     let endDate: Date | null = null;
@@ -390,52 +545,50 @@ export async function scrapeTournamentDetails(wikiUrl: string): Promise<Tourname
     let teamSize: number | null = null;
     let participantCount: number | null = null;
 
-    // Parse from infobox
-    $('.infobox-cell-2, .infobox tr, .fo-nttax-infobox div').each((_, el) => {
+    // Parse infobox (multiple possible formats)
+    $('.infobox-cell-2, .infobox tr, .fo-nttax-infobox div, .infobox-description').each((_, el) => {
       const $el = $(el);
-      const text = $el.text().toLowerCase();
-      const value = $el.text();
+      const label = $el.find('.infobox-cell-1, th').text().toLowerCase();
+      const value = $el.find('.infobox-cell-2, td').text() || $el.text();
 
-      if (text.includes('tier')) {
+      if (label.includes('tier') || label.includes('type')) {
         tier = parseTier(value);
       }
-      if (text.includes('date') || text.includes('start')) {
+      if (label.includes('date') || label.includes('start')) {
         const dates = parseDateRange(value);
         if (dates.startDate) startDate = dates.startDate;
         if (dates.endDate) endDate = dates.endDate;
       }
-      if (text.includes('prize') || text.includes('pool')) {
+      if (label.includes('prize') || label.includes('pool')) {
         prizePool = parsePrizePool(value);
       }
-      if (text.includes('region') || text.includes('location')) {
+      if (label.includes('region') || label.includes('server')) {
         region = parseRegion(value) || extractRegionText(value);
       }
-      if (text.includes('format') || text.includes('type')) {
+      if (label.includes('format') || label.includes('mode')) {
         format = extractFormatText(value);
-      }
-      if (text.includes('organizer') || text.includes('host')) {
-        organizer = extractOrganizerText($el, $);
-      }
-      if (text.includes('venue') || text.includes('location')) {
-        venue = extractVenueText(value);
-      }
-      if (text.includes('mode') || text.includes('game mode')) {
         gameMode = extractGameMode(value);
       }
-      if (text.includes('team size') || text.includes('players per')) {
+      if (label.includes('organizer') || label.includes('host')) {
+        organizer = extractOrganizerText($el, $);
+      }
+      if (label.includes('venue') || label.includes('location')) {
+        venue = extractVenueText(value);
+      }
+      if (label.includes('team size') || label.includes('players per')) {
         teamSize = extractTeamSize(value);
       }
-      if (text.includes('participant') || text.includes('teams')) {
-        participantCount = extractParticipantCount(value);
+      if (label.includes('participant') || label.includes('teams') || label.includes('players')) {
+        participantCount = extractParticipantCountNum(value);
       }
     });
 
-    // Get description from first paragraph
+    // Get description
     const description = $('.mw-parser-output > p').first().text().trim() || null;
 
     // Get logo
     let logoUrl: string | null = null;
-    const logoImg = $('.infobox-image img, .tournament-logo img').first();
+    const logoImg = $('.infobox-image img, .tournament-logo img, .infobox img').first();
     const logoSrc = logoImg.attr('src') || logoImg.attr('data-src');
     if (logoSrc && !logoSrc.includes('placeholder')) {
       logoUrl = logoSrc.startsWith('http') ? logoSrc : `${LIQUIPEDIA_BASE}${logoSrc}`;
@@ -444,11 +597,11 @@ export async function scrapeTournamentDetails(wikiUrl: string): Promise<Tourname
     // Determine status
     const now = new Date();
     let status: 'upcoming' | 'ongoing' | 'completed' = 'completed';
-    if (startDate && (startDate as Date) > now) status = 'upcoming';
-    else if (endDate && (endDate as Date) >= now && startDate && (startDate as Date) <= now) status = 'ongoing';
+    if (startDate && startDate > now) status = 'upcoming';
+    else if (endDate && endDate >= now && startDate && startDate <= now) status = 'ongoing';
 
-    // Scrape results
-    const results = await scrapeTournamentResults($);
+    // Scrape results (top 500 placements)
+    const results = scrapeTournamentResults($);
 
     const details: TournamentDetails = {
       slug,
@@ -463,11 +616,11 @@ export async function scrapeTournamentDetails(wikiUrl: string): Promise<Tourname
       status,
       wikiUrl,
       logoUrl,
+      participantCount,
       description,
       venue,
       gameMode,
       teamSize,
-      participantCount,
       results,
     };
 
@@ -486,8 +639,21 @@ function scrapeTournamentResults($: cheerio.CheerioAPI): TournamentPlacement[] {
   const results: TournamentPlacement[] = [];
   const seenPlayers = new Set<string>();
 
-  // Look for results tables
-  $('table.wikitable, table.prizepooltable, .resulttable').each((_, table) => {
+  // 1. Look for prizepooltable (most common format)
+  $('.prizepooltable, .csstable-widget').each((_, table) => {
+    const $table = $(table);
+
+    $table.find('.csstable-widget-row, .prizepooltable-row, tr').each((_, row) => {
+      const $row = $(row);
+      const placement = parsePrizePoolTableRow($, $row, seenPlayers);
+      if (placement) {
+        results.push(placement);
+      }
+    });
+  });
+
+  // 2. Look for results tables (wikitable format)
+  $('table.wikitable').each((_, table) => {
     const $table = $(table);
     const tableText = $table.text().toLowerCase();
 
@@ -495,106 +661,88 @@ function scrapeTournamentResults($: cheerio.CheerioAPI): TournamentPlacement[] {
     if (!tableText.includes('place') &&
         !tableText.includes('rank') &&
         !tableText.includes('result') &&
+        !tableText.includes('prize') &&
         !tableText.includes('winner')) {
       return;
     }
 
-    // Process rows
     $table.find('tbody tr, tr').each((_, row) => {
       const $row = $(row);
-      const cells = $row.find('td');
+      if ($row.find('th').length > 0) return; // Skip header
 
+      const cells = $row.find('td');
       if (cells.length < 2) return;
 
-      // Skip header rows
-      if ($row.find('th').length > 0) return;
-
-      const placement = parseRow($, $row, cells, seenPlayers);
+      const placement = parseResultsTableRow($, $row, cells, seenPlayers);
       if (placement) {
         results.push(placement);
       }
     });
   });
 
-  // Also check for prize pool templates (common on Liquipedia)
-  $('.csstable-widget-row, .bracket-game').each((_, el) => {
+  // 3. Look for bracket results
+  $('.bracket-game, .bracket-team-top, .bracket-team-bottom').each((_, el) => {
     const $el = $(el);
-    const placement = parsePrizePoolRow($, $el, seenPlayers);
+    const placement = parseBracketResult($, $el, seenPlayers);
     if (placement) {
       results.push(placement);
     }
   });
 
-  // Sort by rank
+  // Sort by rank and limit to top 500
   results.sort((a, b) => a.rank - b.rank);
-
-  return results.slice(0, 500); // Top 500
+  return results.slice(0, 500);
 }
 
 /**
- * Parse placement from table row
+ * Parse prize pool table row (common Liquipedia format)
  */
-function parseRow(
+function parsePrizePoolTableRow(
   $: cheerio.CheerioAPI,
   $row: any,
-  cells: any,
   seenPlayers: Set<string>
 ): TournamentPlacement | null {
-  // Find rank (usually first cell with a number)
-  let rank = 0;
-  let rankFound = false;
-  cells.each((_: number, cell: any) => {
-    if (rankFound) return;
-    const text = $(cell).text().trim();
-    const rankMatch = text.match(/^(\d+)(st|nd|rd|th)?$/i);
-    if (rankMatch && rankMatch[1]) {
-      rank = parseInt(rankMatch[1], 10);
-      rankFound = true;
-    }
-  });
+  const text = $row.text();
 
-  if (!rank || rank > 500) return null;
+  // Look for rank (1st, 2nd, 3rd, etc.)
+  const rankMatch = text.match(/(\d+)(?:st|nd|rd|th)?(?:\s*[-–]?\s*\d+(?:st|nd|rd|th)?)?/);
+  if (!rankMatch) return null;
 
-  // Find player/team
+  const rank = parseInt(rankMatch[1], 10);
+  if (rank <= 0 || rank > 500) return null;
+
+  // Find player/team link
   const playerLink = $row.find('a[href*="/fortnite/"]').filter((_: number, el: any) => {
     const href = $(el).attr('href') || '';
-    return !href.includes('Portal:') &&
-           !href.includes('Category:') &&
-           !href.includes('Tournament');
+    return !href.includes('Category:') &&
+           !href.includes('Portal:') &&
+           !href.includes('Tournament') &&
+           !href.includes('Cup') &&
+           !href.includes('Championship');
   }).first();
 
   let playerName = playerLink.text().trim();
   let playerWikiUrl = playerLink.attr('href');
 
-  // If no link, try text content
+  // Also try span with player name
   if (!playerName) {
-    // Look for player name in cells (usually 2nd or 3rd column)
-    for (let i = 1; i < cells.length && i < 4; i++) {
-      const cellText = cells.eq(i).text().trim();
-      if (cellText && cellText.length > 1 && cellText.length < 50 &&
-          !cellText.match(/^\$/) && !cellText.match(/^\d+$/)) {
-        playerName = cellText;
-        break;
-      }
-    }
+    const nameSpan = $row.find('.name, .block-player .name, .team-template-text').first();
+    playerName = nameSpan.text().trim();
   }
 
-  if (!playerName || seenPlayers.has(playerName.toLowerCase())) return null;
+  if (!playerName || playerName === 'TBD' || seenPlayers.has(playerName.toLowerCase())) {
+    return null;
+  }
   seenPlayers.add(playerName.toLowerCase());
 
-  // Parse earnings
-  const rowText = $row.text();
-  const earnings = parsePrizePool(rowText);
-
-  // Parse points
-  const points = parsePoints(rowText);
-
-  // Parse kills
-  const kills = parseKills(rowText);
+  // Parse additional stats
+  const earnings = parsePrizePool(text);
+  const points = parsePoints(text);
+  const kills = parseKills(text);
 
   // Parse team info
-  const teamName = parseTeamName($, $row);
-  const teamMembers = parseTeamMembers($, $row);
+  const teamName = parseTeamNameFromRow($, $row);
+  const teamMembers = parseTeamMembersFromRow($, $row);
 
   return {
     rank,
@@ -609,27 +757,93 @@ function parseRow(
 }
 
 /**
- * Parse prize pool row (common template format)
+ * Parse results from standard wikitable row
  */
-function parsePrizePoolRow(
-  _$: cheerio.CheerioAPI,
+function parseResultsTableRow(
+  $: cheerio.CheerioAPI,
+  $row: any,
+  cells: any,
+  seenPlayers: Set<string>
+): TournamentPlacement | null {
+  // Find rank (usually first numeric cell)
+  let rank = 0;
+  for (let i = 0; i < cells.length; i++) {
+    const cellText = cells.eq(i).text().trim();
+    const rankMatch = cellText.match(/^(\d+)(st|nd|rd|th)?$/i);
+    if (rankMatch && rankMatch[1]) {
+      rank = parseInt(rankMatch[1], 10);
+      break;
+    }
+  }
+
+  if (!rank || rank > 500) return null;
+
+  // Find player link
+  const playerLink = $row.find('a[href*="/fortnite/"]').filter((_: number, el: any) => {
+    const href = $(el).attr('href') || '';
+    return !href.includes('Portal:') &&
+           !href.includes('Category:') &&
+           !href.includes('Tournament');
+  }).first();
+
+  let playerName = playerLink.text().trim();
+  const playerWikiUrl = playerLink.attr('href');
+
+  // If no link, look for text in cells
+  if (!playerName) {
+    for (let i = 1; i < Math.min(cells.length, 4); i++) {
+      const cellText = cells.eq(i).text().trim();
+      if (cellText &&
+          cellText.length > 1 &&
+          cellText.length < 50 &&
+          !cellText.match(/^\$/) &&
+          !cellText.match(/^\d+$/) &&
+          cellText !== 'TBD') {
+        playerName = cellText;
+        break;
+      }
+    }
+  }
+
+  if (!playerName || seenPlayers.has(playerName.toLowerCase())) return null;
+  seenPlayers.add(playerName.toLowerCase());
+
+  const rowText = $row.text();
+
+  return {
+    rank,
+    playerName,
+    playerWikiUrl: playerWikiUrl ? `${LIQUIPEDIA_BASE}${playerWikiUrl}` : null,
+    points: parsePoints(rowText),
+    kills: parseKills(rowText),
+    earnings: parsePrizePool(rowText),
+    teamName: parseTeamNameFromRow($, $row),
+    teamMembers: parseTeamMembersFromRow($, $row),
+  };
+}
+
+/**
+ * Parse bracket result
+ */
+function parseBracketResult(
+  $: cheerio.CheerioAPI,
   $el: any,
   seenPlayers: Set<string>
 ): TournamentPlacement | null {
   const text = $el.text();
-
-  // Look for rank
-  const rankMatch = text.match(/(\d+)(st|nd|rd|th)/i);
-  if (!rankMatch) return null;
-  const rank = parseInt(rankMatch[1], 10);
-  if (rank > 500) return null;
-
-  // Look for player
   const playerLink = $el.find('a[href*="/fortnite/"]').first();
-  let playerName = playerLink.text().trim();
+  const playerName = playerLink.text().trim();
   const playerWikiUrl = playerLink.attr('href');
 
-  if (!playerName || seenPlayers.has(playerName.toLowerCase())) return null;
+  if (!playerName || playerName === 'TBD' || seenPlayers.has(playerName.toLowerCase())) {
+    return null;
+  }
+
+  // Try to determine rank from bracket position
+  let rank = 999;
+  if ($el.hasClass('bracket-team-top') || text.includes('Winner')) rank = 1;
+  else if ($el.hasClass('bracket-team-bottom') || text.includes('Runner')) rank = 2;
+
   seenPlayers.add(playerName.toLowerCase());
 
   return {
@@ -647,7 +861,7 @@ function parsePrizePoolRow(
 // ============ DATABASE SYNC ============
 
 /**
- * Sync all tournaments to database
+ * Sync all tournaments to database with player/org linking
  */
 export async function syncTournamentsToDatabase(options?: {
   years?: number[];
@@ -657,7 +871,7 @@ export async function syncTournamentsToDatabase(options?: {
   const { years, scrapeDetails = false, scrapeResults = false } = options || {};
 
   console.log('Starting tournament sync to database...');
-  const tournaments = await scrapeAllTournaments({ years });
+  const tournaments = await scrapeAllTournaments({ years, includeSeriesPages: true });
 
   let syncedTournaments = 0;
   let syncedResults = 0;
@@ -668,7 +882,7 @@ export async function syncTournamentsToDatabase(options?: {
       let details: TournamentDetails | null = null;
       if (scrapeDetails || scrapeResults) {
         details = await scrapeTournamentDetails(tournament.wikiUrl);
-        await sleep(200); // Rate limit
+        await sleep(250); // Rate limit
       }
 
       // Upsert tournament
@@ -692,7 +906,7 @@ export async function syncTournamentsToDatabase(options?: {
             venue: details?.venue,
             gameMode: details?.gameMode,
             teamSize: details?.teamSize,
-            participantCount: details?.participantCount,
+            participantCount: tournament.participantCount || details?.participantCount,
             source: 'liquipedia',
           },
         },
@@ -713,7 +927,7 @@ export async function syncTournamentsToDatabase(options?: {
             venue: details?.venue,
             gameMode: details?.gameMode,
             teamSize: details?.teamSize,
-            participantCount: details?.participantCount,
+            participantCount: tournament.participantCount || details?.participantCount,
             source: 'liquipedia',
           },
           lastUpdated: new Date(),
@@ -721,14 +935,17 @@ export async function syncTournamentsToDatabase(options?: {
       });
       syncedTournaments++;
 
-      // Sync results if we have them
+      // Sync results with player/org linking
       if (scrapeResults && details?.results) {
         for (const result of details.results) {
           try {
-            // Create a unique account ID for wiki-sourced data
-            const accountId = result.playerWikiUrl
-              ? `wiki-${result.playerWikiUrl.split('/').pop()}`
-              : `wiki-${result.playerName.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+            const linkedData = await linkResultToPlayerAndOrg(result);
+
+            // Create unique account ID
+            const accountId = linkedData.playerId ||
+              (result.playerWikiUrl
+                ? `wiki-${result.playerWikiUrl.split('/').pop()}`
+                : `wiki-${result.playerName.toLowerCase().replace(/[^a-z0-9]/g, '')}`);
 
             await prisma.tournamentResult.upsert({
               where: {
@@ -745,10 +962,12 @@ export async function syncTournamentsToDatabase(options?: {
                 points: result.points || 0,
                 kills: result.kills,
                 earnings: result.earnings,
-                teamName: result.teamName,
+                teamName: linkedData.orgName || result.teamName,
                 data: {
                   teamMembers: result.teamMembers,
                   playerWikiUrl: result.playerWikiUrl,
+                  linkedPlayerId: linkedData.playerId,
+                  linkedOrgSlug: linkedData.orgSlug,
                   source: 'liquipedia',
                 },
               },
@@ -758,10 +977,12 @@ export async function syncTournamentsToDatabase(options?: {
                 points: result.points || 0,
                 kills: result.kills,
                 earnings: result.earnings,
-                teamName: result.teamName,
+                teamName: linkedData.orgName || result.teamName,
                 data: {
                   teamMembers: result.teamMembers,
                   playerWikiUrl: result.playerWikiUrl,
+                  linkedPlayerId: linkedData.playerId,
+                  linkedOrgSlug: linkedData.orgSlug,
                   source: 'liquipedia',
                 },
               },
@@ -773,7 +994,7 @@ export async function syncTournamentsToDatabase(options?: {
         }
       }
 
-      // Log progress every 50 tournaments
+      // Log progress
       if (syncedTournaments % 50 === 0) {
         console.log(`Progress: ${syncedTournaments}/${tournaments.length} tournaments synced`);
       }
@@ -784,6 +1005,66 @@ export async function syncTournamentsToDatabase(options?: {
 
   console.log(`Sync complete: ${syncedTournaments} tournaments, ${syncedResults} results`);
   return { tournaments: syncedTournaments, results: syncedResults };
+}
+
+/**
+ * Link tournament result to existing player and org in database
+ */
+async function linkResultToPlayerAndOrg(result: TournamentPlacement): Promise<{
+  playerId: string | null;
+  orgSlug: string | null;
+  orgName: string | null;
+}> {
+  let playerId: string | null = null;
+  let orgSlug: string | null = null;
+  let orgName: string | null = null;
+
+  try {
+    // Try to find player by name (case-insensitive search)
+    const player = await prisma.player.findFirst({
+      where: {
+        OR: [
+          { displayName: { equals: result.playerName, mode: 'insensitive' } },
+          { displayName: { contains: result.playerName, mode: 'insensitive' } },
+        ],
+      },
+      include: {
+        currentOrg: true,
+      },
+    });
+
+    if (player) {
+      playerId = player.accountId;
+
+      // If player has an org, use it
+      if (player.currentOrg) {
+        orgSlug = player.currentOrg.slug;
+        orgName = player.currentOrg.name;
+      }
+    }
+
+    // If result has team name, try to find that org
+    if (!orgSlug && result.teamName) {
+      const org = await prisma.organization.findFirst({
+        where: {
+          OR: [
+            { name: { equals: result.teamName, mode: 'insensitive' } },
+            { name: { contains: result.teamName, mode: 'insensitive' } },
+            { slug: { equals: result.teamName.toLowerCase().replace(/[^a-z0-9]/g, '-'), mode: 'insensitive' } },
+          ],
+        },
+      });
+
+      if (org) {
+        orgSlug = org.slug;
+        orgName = org.name;
+      }
+    }
+  } catch (error) {
+    // Linking is optional, continue without it
+  }
+
+  return { playerId, orgSlug, orgName };
 }
 
 /**
@@ -805,9 +1086,12 @@ export async function syncTournamentResults(tournamentSlug: string): Promise<num
   let synced = 0;
   for (const result of details.results) {
     try {
-      const accountId = result.playerWikiUrl
-        ? `wiki-${result.playerWikiUrl.split('/').pop()}`
-        : `wiki-${result.playerName.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+      const linkedData = await linkResultToPlayerAndOrg(result);
+
+      const accountId = linkedData.playerId ||
+        (result.playerWikiUrl
+          ? `wiki-${result.playerWikiUrl.split('/').pop()}`
+          : `wiki-${result.playerName.toLowerCase().replace(/[^a-z0-9]/g, '')}`);
 
       await prisma.tournamentResult.upsert({
         where: {
@@ -824,10 +1108,12 @@ export async function syncTournamentResults(tournamentSlug: string): Promise<num
           points: result.points || 0,
           kills: result.kills,
           earnings: result.earnings,
-          teamName: result.teamName,
+          teamName: linkedData.orgName || result.teamName,
           data: {
             teamMembers: result.teamMembers,
             playerWikiUrl: result.playerWikiUrl,
+            linkedPlayerId: linkedData.playerId,
+            linkedOrgSlug: linkedData.orgSlug,
           },
         },
         update: {
@@ -836,10 +1122,12 @@ export async function syncTournamentResults(tournamentSlug: string): Promise<num
           points: result.points || 0,
           kills: result.kills,
           earnings: result.earnings,
-          teamName: result.teamName,
+          teamName: linkedData.orgName || result.teamName,
           data: {
             teamMembers: result.teamMembers,
             playerWikiUrl: result.playerWikiUrl,
+            linkedPlayerId: linkedData.playerId,
+            linkedOrgSlug: linkedData.orgSlug,
           },
         },
       });
@@ -905,6 +1193,27 @@ export async function getTournaments(options?: {
 }
 
 /**
+ * Get upcoming tournaments
+ */
+export async function getUpcomingTournaments(limit = 20): Promise<any[]> {
+  return prisma.tournament.findMany({
+    where: {
+      OR: [
+        { startDate: { gt: new Date() } },
+        {
+          AND: [
+            { startDate: { lte: new Date() } },
+            { isCompleted: false },
+          ],
+        },
+      ],
+    },
+    orderBy: { startDate: 'asc' },
+    take: limit,
+  });
+}
+
+/**
  * Get tournament by ID with results
  */
 export async function getTournamentById(tournamentId: string): Promise<any> {
@@ -920,7 +1229,7 @@ export async function getTournamentById(tournamentId: string): Promise<any> {
 }
 
 /**
- * Get tournament results
+ * Get tournament results with player/org info
  */
 export async function getTournamentResults(
   tournamentId: string,
@@ -928,12 +1237,123 @@ export async function getTournamentResults(
 ): Promise<any[]> {
   const { limit = 100, offset = 0 } = options || {};
 
-  return prisma.tournamentResult.findMany({
+  const results = await prisma.tournamentResult.findMany({
     where: { tournamentId },
     orderBy: { rank: 'asc' },
     take: limit,
     skip: offset,
   });
+
+  // Enrich with linked player/org data
+  const enrichedResults = await Promise.all(
+    results.map(async (result) => {
+      const data = result.data as any;
+      let player = null;
+      let org = null;
+
+      if (data?.linkedPlayerId) {
+        player = await prisma.player.findUnique({
+          where: { accountId: data.linkedPlayerId },
+          select: { accountId: true, displayName: true, avatarUrl: true },
+        });
+      }
+
+      if (data?.linkedOrgSlug) {
+        org = await prisma.organization.findUnique({
+          where: { slug: data.linkedOrgSlug },
+          select: { slug: true, name: true, logoUrl: true },
+        });
+      }
+
+      return {
+        ...result,
+        linkedPlayer: player,
+        linkedOrg: org,
+      };
+    })
+  );
+
+  return enrichedResults;
+}
+
+/**
+ * Get player's tournament history
+ */
+export async function getPlayerTournamentHistory(
+  playerIdentifier: string,
+  options?: { limit?: number }
+): Promise<any[]> {
+  const { limit = 50 } = options || {};
+
+  // Try to find by account ID first, then by display name
+  const results = await prisma.tournamentResult.findMany({
+    where: {
+      OR: [
+        { accountId: playerIdentifier },
+        { displayName: { equals: playerIdentifier, mode: 'insensitive' } },
+        {
+          data: {
+            path: ['linkedPlayerId'],
+            equals: playerIdentifier
+          }
+        },
+      ],
+    },
+    include: {
+      tournament: {
+        select: {
+          tournamentId: true,
+          name: true,
+          startDate: true,
+          prizePool: true,
+          region: true,
+        },
+      },
+    },
+    orderBy: { tournament: { startDate: 'desc' } },
+    take: limit,
+  });
+
+  return results;
+}
+
+/**
+ * Get org's tournament history (all players from that org)
+ */
+export async function getOrgTournamentHistory(
+  orgSlug: string,
+  options?: { limit?: number }
+): Promise<any[]> {
+  const { limit = 100 } = options || {};
+
+  const results = await prisma.tournamentResult.findMany({
+    where: {
+      OR: [
+        { teamName: { contains: orgSlug, mode: 'insensitive' } },
+        {
+          data: {
+            path: ['linkedOrgSlug'],
+            equals: orgSlug
+          }
+        },
+      ],
+    },
+    include: {
+      tournament: {
+        select: {
+          tournamentId: true,
+          name: true,
+          startDate: true,
+          prizePool: true,
+          region: true,
+        },
+      },
+    },
+    orderBy: { tournament: { startDate: 'desc' } },
+    take: limit,
+  });
+
+  return results;
 }
 
 // ============ HELPER FUNCTIONS ============
@@ -948,17 +1368,60 @@ function createSlug(name: string): string {
 
 function parseTier(text: string): string | null {
   const lower = text.toLowerCase();
-  if (lower.includes('s-tier') || lower.includes('premier') || lower.includes('major')) return 'S';
-  if (lower.includes('a-tier')) return 'A';
-  if (lower.includes('b-tier')) return 'B';
-  if (lower.includes('c-tier') || lower.includes('weekly')) return 'C';
+  if (lower.includes('s-tier') || lower.includes('premier') || lower.includes('world cup') || lower.includes('global championship')) return 'S';
+  if (lower.includes('a-tier') || lower.includes('major') || lower.includes('grand finals')) return 'A';
+  if (lower.includes('b-tier') || lower.includes('invitational')) return 'B';
+  if (lower.includes('c-tier') || lower.includes('weekly') || lower.includes('cash cup')) return 'C';
   if (lower.includes('monthly')) return 'Monthly';
   if (lower.includes('qualifier')) return 'Qualifier';
   return null;
 }
 
+function parseTierFromCell($cell: any, $: cheerio.CheerioAPI): string | null {
+  const text = $cell.text().toLowerCase();
+  const link = $cell.find('a').first();
+  const title = link.attr('title')?.toLowerCase() || '';
+
+  if (text.includes('s-tier') || title.includes('premier')) return 'S';
+  if (text.includes('a-tier') || title.includes('major')) return 'A';
+  if (text.includes('b-tier')) return 'B';
+  if (text.includes('qualifier')) return 'Qualifier';
+
+  return parseTier(text);
+}
+
+function parseRegionFromCell($cell: any, $: cheerio.CheerioAPI): string | null {
+  const text = $cell.text();
+  const flagImg = $cell.find('img[alt]').first();
+  const alt = flagImg.attr('alt') || '';
+
+  // Check flag image alt text
+  if (alt) {
+    if (alt.includes('Europe')) return 'Europe';
+    if (alt.includes('North America') || alt.includes('UsCa')) return 'NA';
+    if (alt.includes('Brazil')) return 'Brazil';
+    if (alt.includes('Asia')) return 'Asia';
+    if (alt.includes('Oceania') || alt.includes('Anz')) return 'Oceania';
+    if (alt.includes('Middle East')) return 'Middle East';
+  }
+
+  return parseRegion(text);
+}
+
 function parseDateRange(text: string): { startDate: Date | null; endDate: Date | null } {
-  // Try ISO format: 2024-01-15
+  // Try various date formats
+
+  // Format: "Jan 15, 2024" or "January 15, 2024"
+  const monthDayYear = text.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/g);
+  if (monthDayYear && monthDayYear.length > 0 && monthDayYear[0]) {
+    const startDate = new Date(monthDayYear[0]);
+    if (!isNaN(startDate.getTime())) {
+      const endDate = monthDayYear.length > 1 && monthDayYear[1] ? new Date(monthDayYear[1]) : startDate;
+      return { startDate, endDate: isNaN(endDate.getTime()) ? startDate : endDate };
+    }
+  }
+
+  // Format: "2024-01-15"
   const isoMatch = text.match(/(\d{4})-(\d{2})-(\d{2})/g);
   if (isoMatch && isoMatch.length >= 1 && isoMatch[0]) {
     const startDate = new Date(isoMatch[0]);
@@ -966,25 +1429,12 @@ function parseDateRange(text: string): { startDate: Date | null; endDate: Date |
     return { startDate, endDate };
   }
 
-  // Try "Month Day, Year" format
-  const dateRegex = /(\w+)\s+(\d{1,2}),?\s+(\d{4})/g;
-  const matches = [...text.matchAll(dateRegex)];
-  if (matches.length > 0 && matches[0] && matches[0][0]) {
-    const startDate = new Date(matches[0][0]);
-    const endDate = matches.length > 1 && matches[1] && matches[1][0] ? new Date(matches[1][0]) : startDate;
+  // Format: "Apr 12, 2026"
+  const shortMonth = text.match(/([A-Za-z]{3})\s+(\d{1,2}),?\s+(\d{4})/);
+  if (shortMonth && shortMonth[0]) {
+    const startDate = new Date(shortMonth[0]);
     if (!isNaN(startDate.getTime())) {
-      return { startDate, endDate: isNaN(endDate.getTime()) ? startDate : endDate };
-    }
-  }
-
-  // Try "Day Month Year" format
-  const euDateRegex = /(\d{1,2})\s+(\w+)\s+(\d{4})/g;
-  const euMatches = [...text.matchAll(euDateRegex)];
-  if (euMatches.length > 0 && euMatches[0] && euMatches[0][0]) {
-    const startDate = new Date(euMatches[0][0]);
-    if (!isNaN(startDate.getTime())) {
-      const endDate = euMatches.length > 1 && euMatches[1] && euMatches[1][0] ? new Date(euMatches[1][0]) : startDate;
-      return { startDate, endDate };
+      return { startDate, endDate: startDate };
     }
   }
 
@@ -992,23 +1442,22 @@ function parseDateRange(text: string): { startDate: Date | null; endDate: Date |
 }
 
 function parsePrizePool(text: string): number | null {
-  // Remove commas and find dollar amounts
-  const cleaned = text.replace(/,/g, '');
+  const cleaned = text.replace(/,/g, '').replace(/\s/g, '');
 
-  // Match $X.XM (millions)
-  const millionMatch = cleaned.match(/\$\s*([\d.]+)\s*[mM]/);
+  // $X.XM (millions)
+  const millionMatch = cleaned.match(/\$([\d.]+)[mM]/);
   if (millionMatch && millionMatch[1]) {
     return parseFloat(millionMatch[1]) * 1000000;
   }
 
-  // Match $X.XK (thousands)
-  const thousandMatch = cleaned.match(/\$\s*([\d.]+)\s*[kK]/);
+  // $X.XK (thousands)
+  const thousandMatch = cleaned.match(/\$([\d.]+)[kK]/);
   if (thousandMatch && thousandMatch[1]) {
     return parseFloat(thousandMatch[1]) * 1000;
   }
 
-  // Match plain dollar amount
-  const dollarMatch = cleaned.match(/\$\s*([\d.]+)/);
+  // Plain dollar amount $X,XXX or $X.XX
+  const dollarMatch = cleaned.match(/\$([\d.]+)/);
   if (dollarMatch && dollarMatch[1]) {
     const value = parseFloat(dollarMatch[1]);
     return value > 0 ? value : null;
@@ -1019,20 +1468,27 @@ function parsePrizePool(text: string): number | null {
 
 function parseRegion(text: string): string | null {
   const lower = text.toLowerCase();
-  if (lower.includes('na-east') || lower.includes('nae')) return 'NA East';
-  if (lower.includes('na-west') || lower.includes('naw')) return 'NA West';
-  if (lower.includes('europe') || lower.includes(' eu ') || lower.includes('eu-')) return 'Europe';
-  if (lower.includes('brazil') || lower.includes(' br ') || lower.includes('br-')) return 'Brazil';
-  if (lower.includes('asia') || lower.includes('apac')) return 'Asia';
-  if (lower.includes('oceania') || lower.includes(' oce ') || lower.includes('oce-')) return 'Oceania';
-  if (lower.includes('middle east') || lower.includes(' me ')) return 'Middle East';
-  if (lower.includes('north america') || lower.includes(' na ')) return 'NA';
-  if (lower.includes('global') || lower.includes('worldwide')) return 'Global';
+
+  if (lower.includes('na-east') || lower.includes('nae') || lower.includes('na_east')) return 'NA East';
+  if (lower.includes('na-west') || lower.includes('naw') || lower.includes('na_west')) return 'NA West';
+  if (lower.includes('europe') || lower.match(/[^a-z]eu[^a-z]/) || lower.includes('eu-') || lower.includes('/eu')) return 'Europe';
+  if (lower.includes('brazil') || lower.match(/[^a-z]br[^a-z]/) || lower.includes('br-')) return 'Brazil';
+  if (lower.includes('asia') || lower.includes('apac') || lower.includes('/asia')) return 'Asia';
+  if (lower.includes('oceania') || lower.match(/[^a-z]oce[^a-z]/) || lower.includes('oce-')) return 'Oceania';
+  if (lower.includes('middle east') || lower.match(/[^a-z]me[^a-z]/) || lower.includes('middle_east')) return 'Middle East';
+  if (lower.includes('north america') || lower.match(/[^a-z]na[^a-z]/)) return 'NA';
+  if (lower.includes('global') || lower.includes('worldwide') || lower.includes('world')) return 'Global';
+
   return null;
 }
 
+function parseParticipantCount(text: string): number | null {
+  const match = text.match(/(\d+)\s*(?:participants?|players?|teams?)?/i);
+  return match && match[1] ? parseInt(match[1], 10) : null;
+}
+
 function parsePoints(text: string): number | null {
-  const match = text.match(/(\d+)\s*(?:pts?|points)/i);
+  const match = text.match(/(\d+)\s*(?:pts?|points?)/i);
   return match && match[1] ? parseInt(match[1], 10) : null;
 }
 
@@ -1041,21 +1497,21 @@ function parseKills(text: string): number | null {
   return match && match[1] ? parseInt(match[1], 10) : null;
 }
 
-function parseTeamName(_$: cheerio.CheerioAPI, $row: any): string | null {
-  // Look for team in specific cells or data attributes
-  const teamSpan = $row.find('[data-highlighting-class]').first();
+function parseTeamNameFromRow($: cheerio.CheerioAPI, $row: any): string | null {
+  // Look for team template
+  const teamSpan = $row.find('.team-template-text, [data-highlighting-class]').first();
   if (teamSpan.length) {
-    const team = teamSpan.attr('data-highlighting-class');
+    const team = teamSpan.text().trim() || teamSpan.attr('data-highlighting-class');
     if (team && team.length > 1) return team;
   }
   return null;
 }
 
-function parseTeamMembers($: cheerio.CheerioAPI, $row: any): string[] | null {
+function parseTeamMembersFromRow($: cheerio.CheerioAPI, $row: any): string[] | null {
   const members: string[] = [];
   $row.find('a[href*="/fortnite/"]').each((_: number, el: any) => {
     const href = $(el).attr('href') || '';
-    if (!href.includes('Portal:') && !href.includes('Category:')) {
+    if (!href.includes('Portal:') && !href.includes('Category:') && !href.includes('Tournament')) {
       const name = $(el).text().trim();
       if (name && name.length > 1 && name.length < 50 && !members.includes(name)) {
         members.push(name);
@@ -1066,8 +1522,7 @@ function parseTeamMembers($: cheerio.CheerioAPI, $row: any): string[] | null {
 }
 
 function extractRegionText(text: string): string | null {
-  // Extract region from format like "Region: Europe"
-  const match = text.match(/(?:region|location)[:\s]+([^,\n]+)/i);
+  const match = text.match(/(?:region|location|server)[:\s]+([^,\n]+)/i);
   return match && match[1] ? match[1].trim() : null;
 }
 
@@ -1100,8 +1555,8 @@ function extractTeamSize(text: string): number | null {
   return match && match[1] ? parseInt(match[1], 10) : null;
 }
 
-function extractParticipantCount(text: string): number | null {
-  const match = text.match(/(\d+)\s*(?:teams?|participants?|players?)/i);
+function extractParticipantCountNum(text: string): number | null {
+  const match = text.match(/(\d+)/);
   return match && match[1] ? parseInt(match[1], 10) : null;
 }
 
@@ -1117,6 +1572,9 @@ export const tournamentService = {
   syncTournamentsToDatabase,
   syncTournamentResults,
   getTournaments,
+  getUpcomingTournaments,
   getTournamentById,
   getTournamentResults,
+  getPlayerTournamentHistory,
+  getOrgTournamentHistory,
 };
