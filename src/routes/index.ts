@@ -3,6 +3,8 @@ import authRoutes from './auth.routes.js';
 import orgRoutes from './org.routes.js';
 import transferRoutes from './transfer.routes.js';
 import tournamentRoutes from './tournament.routes.js';
+import playerRoutes from './player.routes.js';
+import searchRoutes from './search.routes.js';
 
 const router = Router();
 
@@ -17,11 +19,17 @@ router.use('/auth', authRoutes);
 // Organization routes
 router.use('/orgs', orgRoutes);
 
+// Player routes
+router.use('/players', playerRoutes);
+
 // Transfer routes
 router.use('/transfers', transferRoutes);
 
 // Tournament routes
 router.use('/tournaments', tournamentRoutes);
+
+// Search routes
+router.use('/search', searchRoutes);
 
 // Health check endpoint
 router.get('/health', (req, res) => {
