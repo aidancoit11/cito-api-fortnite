@@ -1,4 +1,6 @@
-import { prisma } from './src/db/client.js';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 async function checkData() {
   const [tournaments, results, orgs, players, rosters, earnings, transfers] = await Promise.all([
@@ -8,7 +10,7 @@ async function checkData() {
     prisma.player.count(),
     prisma.teamRoster.count(),
     prisma.playerTournamentEarning.count(),
-    prisma.transfer.count(),
+    prisma.playerTransfer.count(),
   ]);
 
   console.log('=== DATABASE STATUS ===');
