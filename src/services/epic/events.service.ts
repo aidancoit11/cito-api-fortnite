@@ -105,13 +105,15 @@ async function epicRequest<T>(url: string, retries = 2): Promise<T> {
     } catch (error: any) {
       lastError = error;
 
-      // Log the error
+      // Log the error with full details
       const status = error.response?.status;
-      console.error(`[EpicEvents] Request failed (attempt ${attempt + 1}/${retries + 1}):`, {
-        url: url.substring(0, 100),
-        status,
-        message: error.message,
-      });
+      console.error(`[EpicEvents] Request failed (attempt ${attempt + 1}/${retries + 1}):`);
+      console.error(`  URL: ${url}`);
+      console.error(`  Status: ${status || 'N/A'}`);
+      console.error(`  Message: ${error.message}`);
+      if (error.response?.data) {
+        console.error(`  Response:`, JSON.stringify(error.response.data, null, 2));
+      }
 
       // If auth failed, try to reset and reinitialize token manager
       if (status === 401 || status === 403) {
@@ -154,7 +156,12 @@ export async function getEnabledEvents(): Promise<EpicEvent[]> {
     }
 
     const url = `${EVENTS_API_BASE}/api/v1/events/Fortnite/download/${accountId}`;
+    console.log('[EpicEvents] Fetching enabled events...');
+    console.log(`[EpicEvents] Account ID: ${accountId} (length: ${accountId.length})`);
+    console.log(`[EpicEvents] URL: ${url}`);
+
     const data = await epicRequest<any>(url);
+    console.log(`[EpicEvents] Got ${data?.events?.length || 0} events`);
 
     const events: EpicEvent[] = [];
 
