@@ -3,7 +3,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../../db/client.js';
 import NodeCache from 'node-cache';
 import { findOrCreatePlayer } from '../player.service.js';
-import { proxyManager } from './proxy-manager.js';
+import { proxyManager } from '../../utils/proxy-manager.js';
 
 /**
  * Organization & Roster Scraping Service
@@ -24,17 +24,31 @@ const headers = {
 };
 
 /**
- * Fetch a URL using proxy manager (with rotation and rate limit handling)
- * Falls back to direct axios if proxy manager fails
+ * Fetch URL with rotating proxy support
  */
-async function fetchWithProxy(url: string): Promise<string> {
-  try {
-    return await proxyManager.fetch(url);
-  } catch (error) {
-    // Fallback to direct request
-    const response = await axios.get(url, { headers, timeout: 15000 });
-    return response.data;
+async function fetchWithProxy(url: string, retries = 3): Promise<string> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const proxyConfig = proxyManager.getAxiosConfig();
+      const response = await axios.get(url, {
+        headers,
+        timeout: 20000,
+        ...proxyConfig,
+      });
+      return response.data;
+    } catch (error: any) {
+      lastError = error;
+      console.log(`[OrgScraper] Request failed (attempt ${attempt + 1}/${retries}): ${error.message}`);
+
+      if (attempt < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
   }
+
+  throw lastError || new Error('Failed to fetch URL');
 }
 
 export interface ScrapedPlayerDetails {

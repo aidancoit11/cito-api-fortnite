@@ -9,7 +9,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { prisma } from '../../db/client.js';
 import NodeCache from 'node-cache';
-import { proxyManager } from './proxy-manager.js';
+import { proxyManager } from '../../utils/proxy-manager.js';
 
 const cache = new NodeCache({ stdTTL: 3600 }); // 1 hour cache
 
@@ -23,15 +23,32 @@ const headers = {
 };
 
 /**
- * Fetch URL using proxy manager with fallback to direct
+ * Fetch URL with rotating proxy support
  */
-async function fetchWithProxy(url: string): Promise<string> {
-  try {
-    return await proxyManager.fetch(url);
-  } catch (error) {
-    const response = await axios.get(url, { headers, timeout: 15000 });
-    return response.data;
+async function fetchWithProxy(url: string, retries = 3): Promise<string> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const proxyConfig = proxyManager.getAxiosConfig();
+      const response = await axios.get(url, {
+        headers,
+        timeout: 20000,
+        ...proxyConfig,
+      });
+      return response.data;
+    } catch (error: any) {
+      lastError = error;
+      console.log(`[Tournament] Request failed (attempt ${attempt + 1}/${retries}): ${error.message}`);
+
+      // If proxy failed, try next one
+      if (attempt < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
   }
+
+  throw lastError || new Error('Failed to fetch URL');
 }
 
 // ============ TYPES ============

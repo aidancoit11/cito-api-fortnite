@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { prisma } from '../../db/client.js';
 import NodeCache from 'node-cache';
+import { proxyManager } from '../../utils/proxy-manager.js';
 
 /**
  * Earnings Scraping Service
@@ -16,6 +17,34 @@ const headers = {
   'Accept': 'text/html,application/xhtml+xml',
   'Accept-Language': 'en-US,en;q=0.9',
 };
+
+/**
+ * Fetch URL with rotating proxy support
+ */
+async function fetchWithProxy(url: string, retries = 3): Promise<string> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const proxyConfig = proxyManager.getAxiosConfig();
+      const response = await axios.get(url, {
+        headers,
+        timeout: 20000,
+        ...proxyConfig,
+      });
+      return response.data;
+    } catch (error: any) {
+      lastError = error;
+      console.log(`[EarningsScraper] Request failed (attempt ${attempt + 1}/${retries}): ${error.message}`);
+
+      if (attempt < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  throw lastError || new Error('Failed to fetch URL');
+}
 
 export interface ScrapedEarning {
   tournamentId: string;
@@ -234,15 +263,15 @@ export async function scrapePlayerEarnings(wikiUrl: string): Promise<ScrapedEarn
     // Try /Results page first (has ALL results), fallback to main player page
     // The main player page only shows ~10 top results, /Results has full history
     const resultsUrl = wikiUrl.replace(/\/?$/, '/Results');
-    let response;
+    let html: string;
     try {
-      response = await axios.get(resultsUrl, { headers });
+      html = await fetchWithProxy(resultsUrl);
     } catch {
       // /Results page doesn't exist, try main player page
-      response = await axios.get(wikiUrl, { headers });
+      html = await fetchWithProxy(wikiUrl);
     }
 
-    const $ = cheerio.load(response.data);
+    const $ = cheerio.load(html);
     const earnings: ScrapedEarning[] = [];
     const seenTournaments = new Set<string>();
 
