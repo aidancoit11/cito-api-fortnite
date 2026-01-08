@@ -2,6 +2,7 @@ import { Router } from 'express';
 import authRoutes from './auth.routes.js';
 import orgRoutes from './org.routes.js';
 import transferRoutes from './transfer.routes.js';
+import tournamentRoutes from './tournament.routes.js';
 
 const router = Router();
 
@@ -18,6 +19,9 @@ router.use('/orgs', orgRoutes);
 
 // Transfer routes
 router.use('/transfers', transferRoutes);
+
+// Tournament routes
+router.use('/tournaments', tournamentRoutes);
 
 // Health check endpoint
 router.get('/health', (req, res) => {

@@ -3,6 +3,7 @@ import { tokenManager } from '../services/epic/token-manager.js';
 import { startTokenRefreshJob } from './token-refresh.js';
 import { startRosterSyncJob } from './roster-sync.js';
 import { startEarningsSyncJob } from './earnings-sync.js';
+import { startTournamentSyncJob } from './tournament-sync.js';
 
 /**
  * Jobs Manager
@@ -12,7 +13,7 @@ import { startEarningsSyncJob } from './earnings-sync.js';
  * - Token Refresh (every 4 hours)
  * - Roster Sync (every 12 hours)
  * - Earnings Sync (daily at 3 AM UTC)
- * - Tournament Scraper (TBD)
+ * - Tournament Sync (daily at 4 AM UTC + every 5 min for live events)
  * - Transfer Scraper (TBD)
  * - Stats Refresh (TBD)
  */
@@ -33,8 +34,8 @@ export async function initializeJobs(): Promise<void> {
     { name: 'Token Refresh', enabled: config.cron.tokenRefresh, start: startTokenRefreshJob },
     { name: 'Roster Sync', enabled: config.cron.rosterScraper, start: startRosterSyncJob },
     { name: 'Earnings Sync', enabled: config.cron.earningsAggregator, start: startEarningsSyncJob },
+    { name: 'Tournament Sync', enabled: config.cron.tournamentScraper, start: startTournamentSyncJob },
     // Future jobs will be added here:
-    // { name: 'Tournament Scraper', enabled: config.cron.tournamentScraper, start: startTournamentScraperJob },
     // { name: 'Transfer Scraper', enabled: config.cron.transferScraper, start: startTransferScraperJob },
     // { name: 'Stats Refresh', enabled: config.cron.statsRefresh, start: startStatsRefreshJob },
   ];
