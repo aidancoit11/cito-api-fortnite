@@ -164,7 +164,7 @@ export async function getEnabledEvents(): Promise<EpicEvent[]> {
 
     for (const region of regions) {
       try {
-        const url = `${EVENTS_API_BASE}/api/v1/events/Fortnite/download/${accountId}?region=${region}&platform=Windows`;
+        const url = `${EVENTS_API_BASE}/api/v1/events/Fortnite/download/${accountId}?region=${region}&platform=Windows&teamAccountIds=${accountId}`;
         console.log(`[EpicEvents] Fetching ${region}...`);
 
         const data = await epicRequest<any>(url);
