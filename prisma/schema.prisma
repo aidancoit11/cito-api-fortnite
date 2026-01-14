@@ -389,16 +389,177 @@ model DeviceAuthCredential {
   @@map("device_auth_credentials")
 }
 
+// ===== SUBSCRIPTION PLANS =====
+// Tier restrictions:
+// - FREE: 100 req/day, 250/month max, NO live data
+// - DEVELOPER ($29): 10k req/day, NO live data
+// - BUSINESS ($99): 100k req/day, live data, webhooks
+// - ENTERPRISE: Custom limits, all features
+
+enum SubscriptionTier {
+  FREE
+  DEVELOPER
+  BUSINESS
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  PAUSED
+}
+
 // ===== API KEYS =====
 model ApiKey {
-  id         String    @id @default(uuid())
-  keyHash    String    @unique @map("key_hash") @db.VarChar(255)
-  userEmail  String?   @map("user_email") @db.VarChar(255)
-  rateLimit  Int       @default(1000) @map("rate_limit")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  expiresAt  DateTime? @map("expires_at")
+  id               String           @id @default(uuid())
+  key              String           @unique @db.VarChar(64) // The actual API key (hashed for storage)
+  keyPrefix        String           @map("key_prefix") @db.VarChar(12) // First 8 chars for identification (cito_xxxxx)
+  name             String           @db.VarChar(100) // User-friendly name for the key
+  userId           String           @map("user_id")
+  tier             SubscriptionTier @default(FREE)
 
+  // Rate limits (overrides tier defaults if set)
+  dailyLimit       Int?             @map("daily_limit")
+  monthlyLimit     Int?             @map("monthly_limit")
+
+  // Feature flags
+  hasLiveAccess    Boolean          @default(false) @map("has_live_access") // Only Business+ gets this
+  hasWebhooks      Boolean          @default(false) @map("has_webhooks")
+  hasHistoricalData Boolean         @default(true) @map("has_historical_data")
+  hasBulkExport    Boolean          @default(false) @map("has_bulk_export")
+
+  // Usage tracking
+  requestsToday    Int              @default(0) @map("requests_today")
+  requestsMonth    Int              @default(0) @map("requests_month")
+  lastRequestAt    DateTime?        @map("last_request_at")
+  lastResetDay     DateTime?        @map("last_reset_day")
+  lastResetMonth   DateTime?        @map("last_reset_month")
+
+  // Status
+  isActive         Boolean          @default(true) @map("is_active")
+  revokedAt        DateTime?        @map("revoked_at")
+  revokedReason    String?          @map("revoked_reason") @db.VarChar(255)
+
+  createdAt        DateTime         @default(now()) @map("created_at")
+  expiresAt        DateTime?        @map("expires_at")
+
+  user             ApiUser          @relation(fields: [userId], references: [id])
+  usageLogs        ApiUsageLog[]
+
+  @@index([userId])
+  @@index([tier])
+  @@index([isActive])
   @@map("api_keys")
+}
+
+// ===== API USERS =====
+model ApiUser {
+  id                  String             @id @default(uuid())
+  email               String             @unique @db.VarChar(255)
+  passwordHash        String?            @map("password_hash") @db.VarChar(255)
+  name                String?            @db.VarChar(255)
+  company             String?            @db.VarChar(255)
+
+  // Stripe integration
+  stripeCustomerId    String?            @unique @map("stripe_customer_id") @db.VarChar(255)
+  stripeSubscriptionId String?           @map("stripe_subscription_id") @db.VarChar(255)
+
+  // Current subscription
+  subscriptionTier    SubscriptionTier   @default(FREE) @map("subscription_tier")
+  subscriptionStatus  SubscriptionStatus @default(ACTIVE) @map("subscription_status")
+  subscriptionStart   DateTime?          @map("subscription_start")
+  subscriptionEnd     DateTime?          @map("subscription_end")
+  trialEndsAt         DateTime?          @map("trial_ends_at")
+
+  // Billing
+  billingEmail        String?            @map("billing_email") @db.VarChar(255)
+  billingAddress      Json?              @map("billing_address")
+
+  // Auth
+  emailVerified       Boolean            @default(false) @map("email_verified")
+  verificationToken   String?            @map("verification_token") @db.VarChar(255)
+  resetToken          String?            @map("reset_token") @db.VarChar(255)
+  resetTokenExpires   DateTime?          @map("reset_token_expires")
+  lastLoginAt         DateTime?          @map("last_login_at")
+
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @default(now()) @map("updated_at")
+
+  apiKeys             ApiKey[]
+  webhooks            Webhook[]
+  invoices            Invoice[]
+
+  @@index([stripeCustomerId])
+  @@index([subscriptionTier])
+  @@map("api_users")
+}
+
+// ===== API USAGE LOGS =====
+model ApiUsageLog {
+  id            String    @id @default(uuid())
+  apiKeyId      String    @map("api_key_id")
+  endpoint      String    @db.VarChar(255)
+  method        String    @db.VarChar(10)
+  statusCode    Int       @map("status_code")
+  responseTime  Int       @map("response_time") // milliseconds
+  ipAddress     String?   @map("ip_address") @db.VarChar(45)
+  userAgent     String?   @map("user_agent") @db.VarChar(500)
+  isLiveEndpoint Boolean  @default(false) @map("is_live_endpoint")
+  timestamp     DateTime  @default(now())
+
+  apiKey        ApiKey    @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId, timestamp])
+  @@index([endpoint])
+  @@index([timestamp])
+  @@map("api_usage_logs")
+}
+
+// ===== WEBHOOKS (Business+ only) =====
+model Webhook {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  url           String    @db.VarChar(500)
+  secret        String    @db.VarChar(64) // For signing payloads
+  events        Json      // Array of event types to subscribe to
+  isActive      Boolean   @default(true) @map("is_active")
+  failureCount  Int       @default(0) @map("failure_count")
+  lastTriggered DateTime? @map("last_triggered")
+  lastSuccess   DateTime? @map("last_success")
+  lastFailure   DateTime? @map("last_failure")
+  lastError     String?   @map("last_error") @db.Text
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  user          ApiUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isActive])
+  @@map("webhooks")
+}
+
+// ===== INVOICES =====
+model Invoice {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  stripeInvoiceId   String?   @unique @map("stripe_invoice_id") @db.VarChar(255)
+  amount            Decimal   @db.Decimal(10, 2)
+  currency          String    @default("usd") @db.VarChar(3)
+  status            String    @db.VarChar(20) // paid, open, void, uncollectible
+  description       String?   @db.VarChar(500)
+  invoiceUrl        String?   @map("invoice_url") @db.Text
+  pdfUrl            String?   @map("pdf_url") @db.Text
+  periodStart       DateTime? @map("period_start")
+  periodEnd         DateTime? @map("period_end")
+  paidAt            DateTime? @map("paid_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  user              ApiUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@map("invoices")
 }
 
 // ===== SCRAPER SCHEDULES =====
@@ -412,4 +573,1144 @@ model ScrapeSchedule {
   errorMessage     String?   @map("error_message") @db.Text
 
   @@map("scrape_schedules")
+}
+
+// ===== TOURNAMENT TEAMS (FOR DUOS/TRIOS/SQUADS) =====
+model TournamentTeam {
+  id             String    @id @default(uuid())
+  tournamentId   String    @map("tournament_id")
+  teamId         String    @map("team_id") @db.VarChar(255)
+  teamName       String?   @map("team_name") @db.VarChar(255)
+  teamSize       Int       @map("team_size") @default(1)
+  rank           Int?
+  totalPoints    Decimal?  @map("total_points") @db.Decimal
+  totalKills     Int?      @map("total_kills")
+  totalEarnings  Decimal?  @map("total_earnings") @db.Decimal
+  matchesPlayed  Int?      @map("matches_played")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  members        TournamentTeamMember[]
+
+  @@unique([tournamentId, teamId])
+  @@index([tournamentId])
+  @@index([rank])
+  @@map("tournament_teams")
+}
+
+// ===== TOURNAMENT TEAM MEMBERS =====
+model TournamentTeamMember {
+  id            String          @id @default(uuid())
+  teamId        String          @map("team_id")
+  accountId     String          @map("account_id") @db.VarChar(255)
+  displayName   String          @map("display_name") @db.VarChar(255)
+  isTeamLeader  Boolean         @default(false) @map("is_team_leader")
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  team          TournamentTeam  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, accountId])
+  @@index([accountId])
+  @@map("tournament_team_members")
+}
+
+// ===== MATCH METADATA =====
+model TournamentMatch {
+  id            String    @id @default(uuid())
+  tournamentId  String    @map("tournament_id")
+  matchId       String    @map("match_id") @db.VarChar(255)
+  sessionId     String?   @map("session_id") @db.VarChar(255)
+  matchNumber   Int       @map("match_number")
+  startTime     DateTime? @map("start_time")
+  endTime       DateTime? @map("end_time")
+  duration      Int?      // seconds
+  totalPlayers  Int?      @map("total_players")
+  totalTeams    Int?      @map("total_teams")
+  replayAvailable Boolean @default(false) @map("replay_available")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  placements    MatchPlacement[]
+  killEvents    MatchKillEvent[]
+
+  @@unique([tournamentId, matchId])
+  @@index([tournamentId, matchNumber])
+  @@index([sessionId])
+  @@map("tournament_matches")
+}
+
+// ===== MATCH PLACEMENTS (ALL TEAMS PER MATCH) =====
+model MatchPlacement {
+  id            String           @id @default(uuid())
+  matchId       String           @map("match_id")
+  teamId        String?          @map("team_id") @db.VarChar(255)
+  accountId     String           @map("account_id") @db.VarChar(255)
+  displayName   String           @map("display_name") @db.VarChar(255)
+  placement     Int
+  kills         Int              @default(0)
+  assists       Int?
+  points        Decimal          @default(0) @db.Decimal
+  damageDealt   Int?             @map("damage_dealt")
+  timeAlive     Int?             @map("time_alive") // seconds
+  teammates     Json?            // Array of teammate account IDs
+  victoryRoyale Boolean          @default(false) @map("victory_royale")
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  match         TournamentMatch  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, accountId])
+  @@index([matchId, placement])
+  @@index([accountId])
+  @@map("match_placements")
+}
+
+// ===== MATCH KILL EVENTS (KILLFEED) =====
+model MatchKillEvent {
+  id                  String           @id @default(uuid())
+  matchId             String           @map("match_id")
+  timestamp           Int              // milliseconds from match start
+  timeFormatted       String           @map("time_formatted") @db.VarChar(10) // "MM:SS"
+  eliminatorAccountId String           @map("eliminator_account_id") @db.VarChar(255)
+  eliminatorName      String?          @map("eliminator_name") @db.VarChar(255)
+  eliminatorIsBot     Boolean          @default(false) @map("eliminator_is_bot")
+  eliminatedAccountId String           @map("eliminated_account_id") @db.VarChar(255)
+  eliminatedName      String?          @map("eliminated_name") @db.VarChar(255)
+  eliminatedIsBot     Boolean          @default(false) @map("eliminated_is_bot")
+  weapon              String           @db.VarChar(100)
+  weaponType          String?          @map("weapon_type") @db.VarChar(50)
+  distance            Int?             // meters
+  isKnocked           Boolean          @default(false) @map("is_knocked")
+  eliminatorPosition  Json?            @map("eliminator_position") // {x, y, z}
+  eliminatedPosition  Json?            @map("eliminated_position") // {x, y, z}
+  createdAt           DateTime         @default(now()) @map("created_at")
+
+  match               TournamentMatch  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([matchId, timestamp])
+  @@index([eliminatorAccountId])
+  @@index([eliminatedAccountId])
+  @@map("match_kill_events")
+}
+
+// ===== EPIC EVENT HISTORY (FOR DISCOVERING ALL TOURNAMENTS) =====
+model EpicEventHistory {
+  id                String    @id @default(uuid())
+  eventId           String    @unique @map("event_id") @db.VarChar(500)
+  displayDataId     String?   @map("display_data_id") @db.VarChar(500)
+  eventName         String    @map("event_name") @db.VarChar(500)
+  eventType         String?   @map("event_type") @db.VarChar(100) // FNCS, Cash Cup, etc.
+  season            String?   @db.VarChar(50)  // Chapter X Season Y
+  region            String?   @db.VarChar(50)
+  platform          String?   @db.VarChar(50)  // PC, Console, Mobile
+  teamSize          Int       @default(1) @map("team_size")
+  prizePool         Decimal?  @map("prize_pool") @db.Decimal
+  startDate         DateTime? @map("start_date")
+  endDate           DateTime? @map("end_date")
+  windowCount       Int       @default(0) @map("window_count")
+  isCompleted       Boolean   @default(false) @map("is_completed")
+  isSynced          Boolean   @default(false) @map("is_synced")
+  tournamentId      String?   @map("tournament_id") // Link to tournaments table
+  metadata          Json?
+  discoveredAt      DateTime  @default(now()) @map("discovered_at")
+  lastUpdated       DateTime  @default(now()) @map("last_updated")
+
+  windows           EpicEventWindow[]
+
+  @@index([eventType])
+  @@index([season])
+  @@index([region])
+  @@index([startDate])
+  @@map("epic_event_history")
+}
+
+// ===== EPIC EVENT WINDOWS =====
+model EpicEventWindow {
+  id                    String           @id @default(uuid())
+  eventHistoryId        String           @map("event_history_id")
+  eventWindowId         String           @map("event_window_id") @db.VarChar(500)
+  round                 Int              @default(1)
+  beginTime             DateTime         @map("begin_time")
+  endTime               DateTime         @map("end_time")
+  scoreboardEndTime     DateTime?        @map("scoreboard_end_time")
+  leaderboardId         String?          @map("leaderboard_id") @db.VarChar(500)
+  requiresAllTokens     Json?            @map("requires_all_tokens")
+  requiresAnyTokens     Json?            @map("requires_any_tokens")
+  isSynced              Boolean          @default(false) @map("is_synced")
+  leaderboardEntryCount Int?             @map("leaderboard_entry_count")
+  createdAt             DateTime         @default(now()) @map("created_at")
+
+  event                 EpicEventHistory @relation(fields: [eventHistoryId], references: [id], onDelete: Cascade)
+
+  @@unique([eventHistoryId, eventWindowId])
+  @@index([beginTime])
+  @@map("epic_event_windows")
+}
+
+// ========================================
+// ===== CALL OF DUTY ESPORTS TABLES =====
+// ========================================
+
+// ===== COD ORGANIZATIONS (CDL TEAMS) =====
+model CodOrganization {
+  codOrgId            String                @id @default(uuid()) @map("cod_org_id")
+  slug                String                @unique @db.VarChar(255)
+  name                String                @db.VarChar(500)
+  logoUrl             String?               @map("logo_url") @db.Text
+  region              String?               @db.VarChar(50) // NA, EU
+  city                String?               @db.VarChar(255)
+  franchiseSlot       Boolean               @default(false) @map("franchise_slot") // Is CDL franchise
+  approxTotalWinnings Decimal?              @map("approx_total_winnings") @db.Decimal(14, 2)
+  website             String?               @db.Text
+  socialMedia         Json?                 @map("social_media")
+  foundedDate         DateTime?             @map("founded_date") @db.Date
+  disbandedDate       DateTime?             @map("disbanded_date") @db.Date
+  description         String?               @db.Text
+  createdAt           DateTime              @default(now()) @map("created_at")
+  lastUpdated         DateTime              @default(now()) @map("last_updated")
+
+  roster              CodTeamRoster[]
+  transfersFrom       CodPlayerTransfer[]   @relation("CodTransfersFrom")
+  transfersTo         CodPlayerTransfer[]   @relation("CodTransfersTo")
+  tournamentResults   CodTournamentResult[]
+  matchResults        CodMatchResult[]      @relation("CodMatchTeam1")
+  matchResultsTeam2   CodMatchResult[]      @relation("CodMatchTeam2")
+  standings           CodCdlStanding[]
+  playerMatchStats    CodPlayerMatchStats[]
+  earningsSummary     CodOrgEarningsSummary?
+
+  @@index([slug])
+  @@index([region])
+  @@index([franchiseSlot])
+  @@map("cod_organizations")
+}
+
+// ===== COD PLAYERS =====
+model CodPlayer {
+  codPlayerId     String                  @id @default(uuid()) @map("cod_player_id")
+  activisionId    String?                 @unique @map("activision_id") @db.VarChar(255)
+  currentIgn      String                  @map("current_ign") @db.VarChar(255)
+  realName        String?                 @map("real_name") @db.VarChar(255)
+  nationality     String?                 @db.VarChar(3)
+  country         String?                 @db.VarChar(100)
+  birthDate       DateTime?               @map("birth_date") @db.Date
+  wikiUrl         String?                 @map("wiki_url") @db.Text
+  imageUrl        String?                 @map("image_url") @db.Text
+  socialMedia     Json?                   @map("social_media")
+  createdAt       DateTime                @default(now()) @map("created_at")
+  lastUpdated     DateTime                @default(now()) @map("last_updated")
+
+  rosterHistory        CodTeamRoster[]
+  transfers            CodPlayerTransfer[]
+  matchStats           CodPlayerMatchStats[]
+  earningsSummary      CodPlayerEarningsSummary?
+  tournamentEarnings   CodPlayerTournamentEarning[]
+
+  @@index([currentIgn])
+  @@index([activisionId])
+  @@index([wikiUrl])
+  @@map("cod_players")
+}
+
+// ===== COD TEAM ROSTERS =====
+model CodTeamRoster {
+  id            String           @id @default(uuid())
+  orgSlug       String           @map("org_slug") @db.VarChar(255)
+  codPlayerId   String?          @map("cod_player_id")
+  playerName    String           @map("player_name") @db.VarChar(255)
+  role          String           @db.VarChar(50) // SMG, AR, Flex, Coach, Substitute
+  status        String           @default("current") @db.VarChar(20) // current, former
+  joinDate      DateTime?        @map("join_date") @db.Date
+  leaveDate     DateTime?        @map("leave_date") @db.Date
+  leaveReason   String?          @map("leave_reason") @db.VarChar(100)
+  isActive      Boolean          @default(true) @map("is_active")
+  lastUpdated   DateTime         @default(now()) @map("last_updated")
+
+  organization  CodOrganization  @relation(fields: [orgSlug], references: [slug])
+  player        CodPlayer?       @relation(fields: [codPlayerId], references: [codPlayerId])
+
+  @@index([orgSlug])
+  @@index([codPlayerId])
+  @@index([status])
+  @@map("cod_team_rosters")
+}
+
+// ===== COD PLAYER TRANSFERS =====
+model CodPlayerTransfer {
+  transferId      String           @id @default(uuid()) @map("transfer_id")
+  codPlayerId     String?          @map("cod_player_id")
+  playerName      String           @map("player_name") @db.VarChar(255)
+  fromOrgSlug     String?          @map("from_org_slug") @db.VarChar(255)
+  toOrgSlug       String?          @map("to_org_slug") @db.VarChar(255)
+  transferDate    DateTime         @map("transfer_date") @db.Date
+  transferType    String           @map("transfer_type") @db.VarChar(50)
+  announcementUrl String?          @map("announcement_url") @db.Text
+  details         String?          @db.Text
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  player          CodPlayer?       @relation(fields: [codPlayerId], references: [codPlayerId])
+  fromOrg         CodOrganization? @relation("CodTransfersFrom", fields: [fromOrgSlug], references: [slug])
+  toOrg           CodOrganization? @relation("CodTransfersTo", fields: [toOrgSlug], references: [slug])
+
+  @@index([codPlayerId])
+  @@index([fromOrgSlug])
+  @@index([toOrgSlug])
+  @@index([transferDate(sort: Desc)])
+  @@map("cod_player_transfers")
+}
+
+// ===== COD TOURNAMENTS =====
+model CodTournament {
+  tournamentId    String                  @id @map("tournament_id") @db.VarChar(255)
+  name            String                  @db.VarChar(500)
+  game            String                  @db.VarChar(50) // mw2, mw3, bo6
+  tier            String?                 @db.VarChar(20) // S, A, B, C
+  organizer       String?                 @db.VarChar(255)
+  startDate       DateTime?               @map("start_date")
+  endDate         DateTime?               @map("end_date")
+  prizePool       Decimal?                @map("prize_pool") @db.Decimal(14, 2)
+  format          String?                 @db.VarChar(50) // 4v4
+  location        String?                 @db.VarChar(255)
+  venue           String?                 @db.VarChar(255)
+  url             String?                 @db.Text
+  isCompleted     Boolean                 @default(false) @map("is_completed")
+  data            Json?
+  lastUpdated     DateTime                @default(now()) @map("last_updated")
+
+  results         CodTournamentResult[]
+  matches         CodMatchResult[]
+
+  @@index([game])
+  @@index([tier])
+  @@index([startDate])
+  @@index([isCompleted])
+  @@map("cod_tournaments")
+}
+
+// ===== COD TOURNAMENT RESULTS (TEAM PLACEMENTS) =====
+model CodTournamentResult {
+  id            String          @id @default(uuid())
+  tournamentId  String          @map("tournament_id")
+  orgSlug       String          @map("org_slug") @db.VarChar(255)
+  teamName      String          @map("team_name") @db.VarChar(255)
+  rank          Int
+  prizeMoney    Decimal?        @map("prize_money") @db.Decimal(12, 2)
+  wins          Int?
+  losses        Int?
+  mapWins       Int?            @map("map_wins")
+  mapLosses     Int?            @map("map_losses")
+  data          Json?
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  tournament    CodTournament   @relation(fields: [tournamentId], references: [tournamentId])
+  organization  CodOrganization @relation(fields: [orgSlug], references: [slug])
+
+  @@unique([tournamentId, orgSlug])
+  @@index([tournamentId, rank])
+  @@index([orgSlug])
+  @@map("cod_tournament_results")
+}
+
+// ===== COD MATCH RESULTS (INDIVIDUAL MATCHES) =====
+model CodMatchResult {
+  id            String          @id @default(uuid())
+  tournamentId  String          @map("tournament_id")
+  matchId       String          @map("match_id") @db.VarChar(255)
+  round         String          @db.VarChar(100) // Group Stage, Winners R1, Grand Finals
+  team1Slug     String          @map("team1_slug") @db.VarChar(255)
+  team2Slug     String          @map("team2_slug") @db.VarChar(255)
+  team1Score    Int             @map("team1_score") // Maps won
+  team2Score    Int             @map("team2_score")
+  winnerSlug    String?         @map("winner_slug") @db.VarChar(255)
+  mapScores     Json?           @map("map_scores") // [{map, mode, team1, team2}]
+  matchDate     DateTime?       @map("match_date")
+  vodUrl        String?         @map("vod_url") @db.Text
+  data          Json?
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  tournament    CodTournament   @relation(fields: [tournamentId], references: [tournamentId])
+  team1         CodOrganization @relation("CodMatchTeam1", fields: [team1Slug], references: [slug])
+  team2         CodOrganization @relation("CodMatchTeam2", fields: [team2Slug], references: [slug])
+  playerStats   CodPlayerMatchStats[]
+
+  @@unique([tournamentId, matchId])
+  @@index([tournamentId])
+  @@index([team1Slug])
+  @@index([team2Slug])
+  @@index([matchDate])
+  @@map("cod_match_results")
+}
+
+// ===== COD PLAYER MATCH STATS (DETAILED PER-MATCH STATS) =====
+model CodPlayerMatchStats {
+  id            String          @id @default(uuid())
+  matchId       String          @map("match_id")
+  codPlayerId   String?         @map("cod_player_id")
+  playerName    String          @map("player_name") @db.VarChar(255)
+  orgSlug       String          @map("org_slug") @db.VarChar(255)
+  kills         Int             @default(0)
+  deaths        Int             @default(0)
+  assists       Int?
+  kdRatio       Decimal?        @map("kd_ratio") @db.Decimal(4, 2)
+  damage        Int?
+  hillTime      Int?            @map("hill_time") // HP mode, seconds
+  firstBloods   Int?            @map("first_bloods")
+  plants        Int?            // SnD mode
+  defuses       Int?            // SnD mode
+  data          Json?
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  match         CodMatchResult  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player        CodPlayer?      @relation(fields: [codPlayerId], references: [codPlayerId])
+  organization  CodOrganization @relation(fields: [orgSlug], references: [slug])
+
+  @@unique([matchId, playerName])
+  @@index([matchId])
+  @@index([codPlayerId])
+  @@index([orgSlug])
+  @@map("cod_player_match_stats")
+}
+
+// ===== COD CDL STANDINGS (LIVE) =====
+model CodCdlStanding {
+  id                        String          @id @default(uuid())
+  season                    String          @db.VarChar(20) // 2024, 2025, 2026
+  orgSlug                   String          @map("org_slug") @db.VarChar(255)
+  rank                      Int
+  cdlPoints                 Int             @default(0) @map("cdl_points")
+  matchWins                 Int             @default(0) @map("match_wins")
+  matchLosses               Int             @default(0) @map("match_losses")
+  matchWinPercentage        Float           @default(0) @map("match_win_percentage")
+  mapWins                   Int             @default(0) @map("map_wins")
+  mapLosses                 Int             @default(0) @map("map_losses")
+  mapWinPercentage          Float           @default(0) @map("map_win_percentage")
+  eventsPlayed              Int             @default(0) @map("events_played")
+  matchStrengthOfSchedule   Float           @default(0) @map("match_sos")
+  mapStrengthOfSchedule     Float           @default(0) @map("map_sos")
+  stage                     String?         @db.VarChar(100) // Regular Season, Major I, Major II, etc.
+  lastUpdated               DateTime        @default(now()) @map("last_updated")
+
+  organization  CodOrganization @relation(fields: [orgSlug], references: [slug])
+
+  @@unique([season, orgSlug, stage])
+  @@index([season, rank])
+  @@index([season, stage])
+  @@map("cod_cdl_standings")
+}
+
+// ===== COD PLAYER TOURNAMENT EARNINGS (INDIVIDUAL RESULTS) =====
+model CodPlayerTournamentEarning {
+  id              String    @id @default(uuid())
+  codPlayerId     String    @map("cod_player_id")
+  tournamentId    String    @map("tournament_id") // unique identifier for the tournament
+  tournamentName  String    @map("tournament_name") @db.VarChar(500)
+  tournamentDate  DateTime  @map("tournament_date") @db.Date
+  placement       Int
+  earnings        Decimal   @db.Decimal(12, 2)
+  prizePool       Decimal?  @map("prize_pool") @db.Decimal(14, 2)
+  tier            String?   @db.VarChar(20) // S-Tier, A-Tier, B-Tier, etc.
+  game            String?   @db.VarChar(50) // mw2, mw3, bo6, etc.
+  teamSize        Int       @default(4) @map("team_size")
+  teammates       Json?     // Array of teammate names
+  orgSlugAtTime   String?   @map("org_slug_at_time") @db.VarChar(255)
+  wikiUrl         String?   @map("wiki_url") @db.Text
+  source          String    @default("liquipedia") @db.VarChar(50)
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  player          CodPlayer @relation(fields: [codPlayerId], references: [codPlayerId])
+
+  @@unique([codPlayerId, tournamentId])
+  @@index([codPlayerId])
+  @@index([tournamentDate])
+  @@index([orgSlugAtTime])
+  @@map("cod_player_tournament_earnings")
+}
+
+// ===== COD PLAYER EARNINGS SUMMARY =====
+model CodPlayerEarningsSummary {
+  codPlayerId       String    @id @map("cod_player_id")
+  totalEarnings     Decimal   @default(0) @map("total_earnings") @db.Decimal(12, 2)
+  tournamentCount   Int       @default(0) @map("tournament_count")
+  firstPlaceCount   Int       @default(0) @map("first_place_count")
+  top10Count        Int       @default(0) @map("top_10_count")
+  avgPlacement      Decimal?  @map("avg_placement") @db.Decimal(5, 2)
+  bestPlacement     Int?      @map("best_placement")
+  highestEarning    Decimal?  @map("highest_earning") @db.Decimal(12, 2)
+  earningsByYear    Json?     @map("earnings_by_year")
+  earningsByGame    Json?     @map("earnings_by_game") // {mw3: 50000, bo6: 100000}
+  lastTournamentDate DateTime? @map("last_tournament_date")
+  lastUpdated       DateTime  @default(now()) @map("last_updated")
+
+  player            CodPlayer @relation(fields: [codPlayerId], references: [codPlayerId])
+
+  @@map("cod_player_earnings_summary")
+}
+
+// ===== COD ORG EARNINGS SUMMARY =====
+model CodOrgEarningsSummary {
+  orgSlug           String          @id @map("org_slug")
+  totalEarnings     Decimal         @default(0) @map("total_earnings") @db.Decimal(12, 2)
+  tournamentCount   Int             @default(0) @map("tournament_count")
+  firstPlaceCount   Int             @default(0) @map("first_place_count")
+  earningsByYear    Json?           @map("earnings_by_year")
+  lastUpdated       DateTime        @default(now()) @map("last_updated")
+
+  organization      CodOrganization @relation(fields: [orgSlug], references: [slug])
+
+  @@map("cod_org_earnings_summary")
+}
+
+// ============================================
+// ===== LEAGUE OF LEGENDS ESPORTS TABLES =====
+// ============================================
+
+// ===== LOL LEAGUES (LCK, LEC, LCS, LPL, ETC.) =====
+model LolLeague {
+  leagueId          String            @id @map("league_id") @db.VarChar(255)
+  esportsApiId      String?           @unique @map("esports_api_id") @db.VarChar(255)
+  name              String            @db.VarChar(255)
+  slug              String            @unique @db.VarChar(100)
+  shortName         String?           @map("short_name") @db.VarChar(20)
+  region            String            @db.VarChar(50) // KR, CN, EU, NA, APAC, BR
+  tier              String?           @db.VarChar(20) // major, regional, amateur
+  imageUrl          String?           @map("image_url") @db.Text
+  priority          Int               @default(100)
+  isActive          Boolean           @default(true) @map("is_active")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  tournaments       LolTournament[]
+  teams             LolLeagueTeam[]
+  standings         LolStanding[]
+
+  @@index([region])
+  @@index([isActive])
+  @@map("lol_leagues")
+}
+
+// ===== LOL ORGANIZATIONS (TEAMS) =====
+model LolOrganization {
+  slug              String            @id @db.VarChar(255)
+  esportsApiId      String?           @unique @map("esports_api_id") @db.VarChar(255)
+  name              String            @db.VarChar(500)
+  shortName         String?           @map("short_name") @db.VarChar(20)
+  region            String?           @db.VarChar(50)
+  logoUrl           String?           @map("logo_url") @db.Text
+  altLogoUrl        String?           @map("alt_logo_url") @db.Text
+  wikiUrl           String?           @map("wiki_url") @db.Text
+  website           String?           @db.Text
+  socialMedia       Json?             @map("social_media")
+  foundedDate       DateTime?         @map("founded_date") @db.Date
+  disbandedDate     DateTime?         @map("disbanded_date") @db.Date
+  headquarters      String?           @db.VarChar(255)
+  approxTotalWinnings Decimal?        @map("approx_total_winnings") @db.Decimal(14, 2)
+  description       String?           @db.Text
+  isActive          Boolean           @default(true) @map("is_active")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  roster            LolTeamRoster[]
+  leagueTeams       LolLeagueTeam[]
+  transfersFrom     LolTransfer[]     @relation("LolTransfersFrom")
+  transfersTo       LolTransfer[]     @relation("LolTransfersTo")
+  tournamentResults LolTournamentResult[]
+  matchesTeam1      LolMatch[]        @relation("LolMatchTeam1")
+  matchesTeam2      LolMatch[]        @relation("LolMatchTeam2")
+  standings         LolStanding[]
+  earningsSummary   LolOrgEarningsSummary?
+
+  @@index([region])
+  @@index([isActive])
+  @@map("lol_organizations")
+}
+
+// ===== LOL LEAGUE-TEAM MAPPING (TEAMS IN LEAGUES) =====
+model LolLeagueTeam {
+  id                String            @id @default(uuid())
+  leagueId          String            @map("league_id")
+  orgSlug           String            @map("org_slug")
+  season            String?           @db.VarChar(50)
+  joinedDate        DateTime?         @map("joined_date") @db.Date
+  leftDate          DateTime?         @map("left_date") @db.Date
+  isActive          Boolean           @default(true) @map("is_active")
+
+  league            LolLeague         @relation(fields: [leagueId], references: [leagueId])
+  organization      LolOrganization   @relation(fields: [orgSlug], references: [slug])
+
+  @@unique([leagueId, orgSlug, season])
+  @@index([leagueId])
+  @@index([orgSlug])
+  @@map("lol_league_teams")
+}
+
+// ===== LOL PLAYERS =====
+model LolPlayer {
+  lolPlayerId       String            @id @default(uuid()) @map("lol_player_id")
+  esportsApiId      String?           @unique @map("esports_api_id") @db.VarChar(255)
+  riotId            String?           @map("riot_id") @db.VarChar(255) // gameName#tagLine
+  puuid             String?           @unique @db.VarChar(100)
+  currentIgn        String            @map("current_ign") @db.VarChar(255)
+  realName          String?           @map("real_name") @db.VarChar(255)
+  nationality       String?           @db.VarChar(3)
+  country           String?           @db.VarChar(100)
+  birthDate         DateTime?         @map("birth_date") @db.Date
+  role              String?           @db.VarChar(20) // Top, Jungle, Mid, ADC, Support
+  wikiUrl           String?           @map("wiki_url") @db.Text
+  imageUrl          String?           @map("image_url") @db.Text
+  socialMedia       Json?             @map("social_media")
+  isActive          Boolean           @default(true) @map("is_active")
+  isFreeAgent       Boolean           @default(false) @map("is_free_agent")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  rosterHistory          LolTeamRoster[]
+  transfers              LolTransfer[]
+  tournamentEarnings     LolPlayerTournamentEarning[]
+  earningsSummary        LolPlayerEarningsSummary?
+  gameStats              LolGamePlayerStats[]
+
+  @@index([currentIgn])
+  @@index([role])
+  @@index([isActive])
+  @@map("lol_players")
+}
+
+// ===== LOL TEAM ROSTERS =====
+model LolTeamRoster {
+  id                String            @id @default(uuid())
+  orgSlug           String            @map("org_slug") @db.VarChar(255)
+  lolPlayerId       String?           @map("lol_player_id")
+  playerName        String            @map("player_name") @db.VarChar(255)
+  role              String            @db.VarChar(50) // Top, Jungle, Mid, ADC, Support, Coach, Sub
+  status            String            @default("current") @db.VarChar(20)
+  joinDate          DateTime?         @map("join_date") @db.Date
+  leaveDate         DateTime?         @map("leave_date") @db.Date
+  leaveReason       String?           @map("leave_reason") @db.VarChar(100)
+  isStarter         Boolean           @default(true) @map("is_starter")
+  isActive          Boolean           @default(true) @map("is_active")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  organization      LolOrganization   @relation(fields: [orgSlug], references: [slug])
+  player            LolPlayer?        @relation(fields: [lolPlayerId], references: [lolPlayerId])
+
+  @@index([orgSlug])
+  @@index([lolPlayerId])
+  @@index([status])
+  @@index([role])
+  @@map("lol_team_rosters")
+}
+
+// ===== LOL TOURNAMENTS =====
+model LolTournament {
+  tournamentId      String            @id @map("tournament_id") @db.VarChar(255)
+  esportsApiId      String?           @unique @map("esports_api_id") @db.VarChar(255)
+  leagueId          String?           @map("league_id")
+  name              String            @db.VarChar(500)
+  slug              String?           @db.VarChar(255)
+  tier              String?           @db.VarChar(20) // S, A, B, C
+  startDate         DateTime?         @map("start_date")
+  endDate           DateTime?         @map("end_date")
+  prizePool         Decimal?          @map("prize_pool") @db.Decimal(14, 2)
+  prizePoolUsd      Decimal?          @map("prize_pool_usd") @db.Decimal(14, 2)
+  currency          String?           @db.VarChar(10)
+  format            String?           @db.VarChar(100) // Bo3, Bo5, Group + Playoffs
+  location          String?           @db.VarChar(255)
+  venue             String?           @db.VarChar(255)
+  patch             String?           @db.VarChar(20)
+  wikiUrl           String?           @map("wiki_url") @db.Text
+  isCompleted       Boolean           @default(false) @map("is_completed")
+  isInternational   Boolean           @default(false) @map("is_international") // Worlds, MSI
+  data              Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  league            LolLeague?        @relation(fields: [leagueId], references: [leagueId])
+  results           LolTournamentResult[]
+  matches           LolMatch[]
+  standings         LolStanding[]
+
+  @@index([leagueId])
+  @@index([tier])
+  @@index([startDate])
+  @@index([isCompleted])
+  @@index([isInternational])
+  @@map("lol_tournaments")
+}
+
+// ===== LOL TOURNAMENT RESULTS (TEAM PLACEMENTS) =====
+model LolTournamentResult {
+  id                String            @id @default(uuid())
+  tournamentId      String            @map("tournament_id")
+  orgSlug           String            @map("org_slug") @db.VarChar(255)
+  rank              Int
+  prizeMoney        Decimal?          @map("prize_money") @db.Decimal(12, 2)
+  prizeMoneyUsd     Decimal?          @map("prize_money_usd") @db.Decimal(12, 2)
+  wins              Int?
+  losses            Int?
+  gameWins          Int?              @map("game_wins")
+  gameLosses        Int?              @map("game_losses")
+  data              Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  tournament        LolTournament     @relation(fields: [tournamentId], references: [tournamentId])
+  organization      LolOrganization   @relation(fields: [orgSlug], references: [slug])
+
+  @@unique([tournamentId, orgSlug])
+  @@index([tournamentId, rank])
+  @@index([orgSlug])
+  @@map("lol_tournament_results")
+}
+
+// ===== LOL STANDINGS =====
+model LolStanding {
+  id                String            @id @default(uuid())
+  leagueId          String            @map("league_id")
+  tournamentId      String?           @map("tournament_id")
+  orgSlug           String            @map("org_slug") @db.VarChar(255)
+  season            String?           @db.VarChar(50)
+  stage             String?           @db.VarChar(100) // Regular Season, Playoffs
+  rank              Int
+  wins              Int               @default(0)
+  losses            Int               @default(0)
+  winRate           Decimal?          @map("win_rate") @db.Decimal(5, 4)
+  gameWins          Int               @default(0) @map("game_wins")
+  gameLosses        Int               @default(0) @map("game_losses")
+  gameWinRate       Decimal?          @map("game_win_rate") @db.Decimal(5, 4)
+  streak            String?           @db.VarChar(20) // W3, L2
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  league            LolLeague         @relation(fields: [leagueId], references: [leagueId])
+  tournament        LolTournament?    @relation(fields: [tournamentId], references: [tournamentId])
+  organization      LolOrganization   @relation(fields: [orgSlug], references: [slug])
+
+  @@unique([leagueId, tournamentId, orgSlug, stage])
+  @@index([leagueId, rank])
+  @@index([tournamentId])
+  @@index([orgSlug])
+  @@map("lol_standings")
+}
+
+// ===== LOL MATCHES =====
+model LolMatch {
+  matchId           String            @id @map("match_id") @db.VarChar(255)
+  esportsApiId      String?           @unique @map("esports_api_id") @db.VarChar(255)
+  tournamentId      String            @map("tournament_id")
+  blockName         String?           @map("block_name") @db.VarChar(100)
+  round             String?           @db.VarChar(100) // Group Stage, Quarterfinals, Finals
+  team1Slug         String            @map("team1_slug") @db.VarChar(255)
+  team2Slug         String            @map("team2_slug") @db.VarChar(255)
+  team1Score        Int?              @map("team1_score")
+  team2Score        Int?              @map("team2_score")
+  winnerSlug        String?           @map("winner_slug") @db.VarChar(255)
+  strategy          String?           @db.VarChar(20) // Bo1, Bo3, Bo5
+  startTime         DateTime?         @map("start_time")
+  endTime           DateTime?         @map("end_time")
+  state             String?           @db.VarChar(20) // unstarted, inProgress, completed
+  vodUrl            String?           @map("vod_url") @db.Text
+  data              Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  tournament        LolTournament     @relation(fields: [tournamentId], references: [tournamentId])
+  team1             LolOrganization   @relation("LolMatchTeam1", fields: [team1Slug], references: [slug])
+  team2             LolOrganization   @relation("LolMatchTeam2", fields: [team2Slug], references: [slug])
+  games             LolGame[]
+
+  @@index([tournamentId])
+  @@index([team1Slug])
+  @@index([team2Slug])
+  @@index([startTime])
+  @@index([state])
+  @@map("lol_matches")
+}
+
+// ===== LOL GAMES (INDIVIDUAL GAMES WITHIN MATCHES) =====
+model LolGame {
+  gameId            String            @id @map("game_id") @db.VarChar(255)
+  esportsApiId      String?           @unique @map("esports_api_id") @db.VarChar(255)
+  matchId           String            @map("match_id")
+  gameNumber        Int               @map("game_number")
+  blueTeamSlug      String            @map("blue_team_slug") @db.VarChar(255)
+  redTeamSlug       String            @map("red_team_slug") @db.VarChar(255)
+  winnerSlug        String?           @map("winner_slug") @db.VarChar(255)
+  winningSide       String?           @map("winning_side") @db.VarChar(10) // blue, red
+  duration          Int?              // seconds
+  patch             String?           @db.VarChar(20)
+  // Team stats
+  blueKills         Int?              @map("blue_kills")
+  blueGold          Int?              @map("blue_gold")
+  blueTowers        Int?              @map("blue_towers")
+  blueDragons       Int?              @map("blue_dragons")
+  blueBarons        Int?              @map("blue_barons")
+  blueHeralds       Int?              @map("blue_heralds")
+  blueInhibitors    Int?              @map("blue_inhibitors")
+  redKills          Int?              @map("red_kills")
+  redGold           Int?              @map("red_gold")
+  redTowers         Int?              @map("red_towers")
+  redDragons        Int?              @map("red_dragons")
+  redBarons         Int?              @map("red_barons")
+  redHeralds        Int?              @map("red_heralds")
+  redInhibitors     Int?              @map("red_inhibitors")
+  // First objectives
+  firstBlood        String?           @map("first_blood") @db.VarChar(10) // blue, red
+  firstTower        String?           @map("first_tower") @db.VarChar(10)
+  firstDragon       String?           @map("first_dragon") @db.VarChar(10)
+  firstBaron        String?           @map("first_baron") @db.VarChar(10)
+  firstHerald       String?           @map("first_herald") @db.VarChar(10)
+  // Bans
+  blueBans          Json?             @map("blue_bans") // Array of champion IDs
+  redBans           Json?             @map("red_bans")
+  data              Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  lastUpdated       DateTime          @default(now()) @map("last_updated")
+
+  match             LolMatch          @relation(fields: [matchId], references: [matchId])
+  playerStats       LolGamePlayerStats[]
+  timeline          LolGameTimeline[]
+
+  @@index([matchId])
+  @@index([blueTeamSlug])
+  @@index([redTeamSlug])
+  @@map("lol_games")
+}
+
+// ===== LOL GAME PLAYER STATS =====
+model LolGamePlayerStats {
+  id                String            @id @default(uuid())
+  gameId            String            @map("game_id")
+  lolPlayerId       String?           @map("lol_player_id")
+  playerName        String            @map("player_name") @db.VarChar(255)
+  teamSlug          String            @map("team_slug") @db.VarChar(255)
+  side              String            @db.VarChar(10) // blue, red
+  role              String            @db.VarChar(20) // Top, Jungle, Mid, ADC, Support
+  championId        Int               @map("champion_id")
+  championName      String            @map("champion_name") @db.VarChar(100)
+  // Core stats
+  kills             Int               @default(0)
+  deaths            Int               @default(0)
+  assists           Int               @default(0)
+  kda               Decimal?          @db.Decimal(5, 2)
+  killParticipation Decimal?          @map("kill_participation") @db.Decimal(5, 4)
+  // Economy
+  cs                Int               @default(0)
+  csPerMin          Decimal?          @map("cs_per_min") @db.Decimal(5, 2)
+  gold              Int               @default(0)
+  goldPerMin        Decimal?          @map("gold_per_min") @db.Decimal(7, 2)
+  goldShare         Decimal?          @map("gold_share") @db.Decimal(5, 4)
+  // Damage
+  damageDealt       Int?              @map("damage_dealt")
+  damagePerMin      Decimal?          @map("damage_per_min") @db.Decimal(7, 2)
+  damageShare       Decimal?          @map("damage_share") @db.Decimal(5, 4)
+  damageTaken       Int?              @map("damage_taken")
+  // Vision
+  visionScore       Int?              @map("vision_score")
+  wardsPlaced       Int?              @map("wards_placed")
+  wardsKilled       Int?              @map("wards_killed")
+  controlWardsBought Int?             @map("control_wards_bought")
+  // Items
+  items             Json?             // Array of item IDs at end
+  // Runes/Summoners
+  primaryRune       Int?              @map("primary_rune")
+  secondaryRune     Int?              @map("secondary_rune")
+  summonerSpell1    Int?              @map("summoner_spell_1")
+  summonerSpell2    Int?              @map("summoner_spell_2")
+  // Extra
+  firstBlood        Boolean           @default(false) @map("first_blood")
+  firstBloodAssist  Boolean           @default(false) @map("first_blood_assist")
+  doubleKills       Int?              @map("double_kills")
+  tripleKills       Int?              @map("triple_kills")
+  quadraKills       Int?              @map("quadra_kills")
+  pentaKills        Int?              @map("penta_kills")
+  data              Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  game              LolGame           @relation(fields: [gameId], references: [gameId], onDelete: Cascade)
+  player            LolPlayer?        @relation(fields: [lolPlayerId], references: [lolPlayerId])
+
+  @@unique([gameId, playerName])
+  @@index([gameId])
+  @@index([lolPlayerId])
+  @@index([championId])
+  @@index([role])
+  @@map("lol_game_player_stats")
+}
+
+// ===== LOL GAME TIMELINE (KEY EVENTS) =====
+model LolGameTimeline {
+  id                String            @id @default(uuid())
+  gameId            String            @map("game_id")
+  timestamp         Int               // milliseconds from game start
+  eventType         String            @map("event_type") @db.VarChar(50) // KILL, TOWER, DRAGON, BARON, etc.
+  teamSlug          String?           @map("team_slug") @db.VarChar(255)
+  side              String?           @db.VarChar(10) // blue, red
+  participantId     Int?              @map("participant_id")
+  playerName        String?           @map("player_name") @db.VarChar(255)
+  victimName        String?           @map("victim_name") @db.VarChar(255)
+  killType          String?           @map("kill_type") @db.VarChar(50) // firstBlood, solo, etc.
+  objectiveType     String?           @map("objective_type") @db.VarChar(50) // infernal, mountain, baron, etc.
+  position          Json?             // {x, y}
+  data              Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  game              LolGame           @relation(fields: [gameId], references: [gameId], onDelete: Cascade)
+
+  @@index([gameId, timestamp])
+  @@index([eventType])
+  @@map("lol_game_timeline")
+}
+
+// ===== LOL TRANSFERS =====
+model LolTransfer {
+  id                String            @id @default(uuid())
+  lolPlayerId       String?           @map("lol_player_id")
+  playerName        String            @map("player_name") @db.VarChar(255)
+  fromOrgSlug       String?           @map("from_org_slug") @db.VarChar(255)
+  toOrgSlug         String?           @map("to_org_slug") @db.VarChar(255)
+  transferDate      DateTime          @map("transfer_date") @db.Date
+  transferType      String            @map("transfer_type") @db.VarChar(50) // signed, released, loan, trade, retired
+  role              String?           @db.VarChar(20)
+  announcementUrl   String?           @map("announcement_url") @db.Text
+  details           String?           @db.Text
+  source            String?           @db.VarChar(50)
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  player            LolPlayer?        @relation(fields: [lolPlayerId], references: [lolPlayerId])
+  fromOrg           LolOrganization?  @relation("LolTransfersFrom", fields: [fromOrgSlug], references: [slug])
+  toOrg             LolOrganization?  @relation("LolTransfersTo", fields: [toOrgSlug], references: [slug])
+
+  @@index([lolPlayerId])
+  @@index([fromOrgSlug])
+  @@index([toOrgSlug])
+  @@index([transferDate(sort: Desc)])
+  @@map("lol_transfers")
+}
+
+// ===== LOL PLAYER TOURNAMENT EARNINGS =====
+model LolPlayerTournamentEarning {
+  id                String            @id @default(uuid())
+  lolPlayerId       String            @map("lol_player_id")
+  tournamentId      String            @map("tournament_id") @db.VarChar(255)
+  tournamentName    String            @map("tournament_name") @db.VarChar(500)
+  tournamentDate    DateTime          @map("tournament_date") @db.Date
+  placement         Int
+  earnings          Decimal           @default(0) @db.Decimal(12, 2)
+  prizePool         Decimal?          @map("prize_pool") @db.Decimal(14, 2)
+  tier              String?           @db.VarChar(20)
+  league            String?           @db.VarChar(100)
+  teamSize          Int               @default(5) @map("team_size")
+  teammates         Json?
+  orgSlugAtTime     String?           @map("org_slug_at_time") @db.VarChar(255)
+  wikiUrl           String?           @map("wiki_url") @db.Text
+  source            String            @default("liquipedia") @db.VarChar(50)
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  player            LolPlayer         @relation(fields: [lolPlayerId], references: [lolPlayerId])
+
+  @@unique([lolPlayerId, tournamentId])
+  @@index([lolPlayerId])
+  @@index([tournamentDate])
+  @@index([orgSlugAtTime])
+  @@map("lol_player_tournament_earnings")
+}
+
+// ===== LOL PLAYER EARNINGS SUMMARY =====
+model LolPlayerEarningsSummary {
+  lolPlayerId           String            @id @map("lol_player_id")
+  totalEarnings         Decimal           @default(0) @map("total_earnings") @db.Decimal(12, 2)
+  tournamentCount       Int               @default(0) @map("tournament_count")
+  firstPlaceCount       Int               @default(0) @map("first_place_count")
+  top3Count             Int               @default(0) @map("top_3_count")
+  avgPlacement          Decimal?          @map("avg_placement") @db.Decimal(5, 2)
+  bestPlacement         Int?              @map("best_placement")
+  highestEarning        Decimal?          @map("highest_earning") @db.Decimal(12, 2)
+  earningsByYear        Json?             @map("earnings_by_year")
+  earningsByLeague      Json?             @map("earnings_by_league")
+  worldsAppearances     Int               @default(0) @map("worlds_appearances")
+  worldsWins            Int               @default(0) @map("worlds_wins")
+  msiAppearances        Int               @default(0) @map("msi_appearances")
+  msiWins               Int               @default(0) @map("msi_wins")
+  lastTournamentDate    DateTime?         @map("last_tournament_date")
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  player                LolPlayer         @relation(fields: [lolPlayerId], references: [lolPlayerId])
+
+  @@map("lol_player_earnings_summary")
+}
+
+// ===== LOL ORG EARNINGS SUMMARY =====
+model LolOrgEarningsSummary {
+  orgSlug               String            @id @map("org_slug")
+  totalEarnings         Decimal           @default(0) @map("total_earnings") @db.Decimal(12, 2)
+  tournamentCount       Int               @default(0) @map("tournament_count")
+  firstPlaceCount       Int               @default(0) @map("first_place_count")
+  worldsWins            Int               @default(0) @map("worlds_wins")
+  msiWins               Int               @default(0) @map("msi_wins")
+  regionalTitles        Int               @default(0) @map("regional_titles")
+  earningsByYear        Json?             @map("earnings_by_year")
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  organization          LolOrganization   @relation(fields: [orgSlug], references: [slug])
+
+  @@map("lol_org_earnings_summary")
+}
+
+// ===== LOL CHAMPIONS (PRO PLAY STATS) =====
+model LolChampionStats {
+  id                    String            @id @default(uuid())
+  championId            Int               @map("champion_id")
+  championName          String            @map("champion_name") @db.VarChar(100)
+  patch                 String            @db.VarChar(20)
+  league                String?           @db.VarChar(100)
+  tier                  String?           @db.VarChar(20) // S-tier, A-tier tournaments only
+  role                  String?           @db.VarChar(20)
+  // Pick/ban stats
+  gamesPlayed           Int               @default(0) @map("games_played")
+  wins                  Int               @default(0)
+  losses                Int               @default(0)
+  winRate               Decimal?          @map("win_rate") @db.Decimal(5, 4)
+  pickRate              Decimal?          @map("pick_rate") @db.Decimal(5, 4)
+  banRate               Decimal?          @map("ban_rate") @db.Decimal(5, 4)
+  presence              Decimal?          @db.Decimal(5, 4) // pick + ban rate
+  // Avg stats
+  avgKills              Decimal?          @map("avg_kills") @db.Decimal(5, 2)
+  avgDeaths             Decimal?          @map("avg_deaths") @db.Decimal(5, 2)
+  avgAssists            Decimal?          @map("avg_assists") @db.Decimal(5, 2)
+  avgKda                Decimal?          @map("avg_kda") @db.Decimal(5, 2)
+  avgCs                 Decimal?          @map("avg_cs") @db.Decimal(7, 2)
+  avgGold               Decimal?          @map("avg_gold") @db.Decimal(9, 2)
+  avgDamage             Decimal?          @map("avg_damage") @db.Decimal(9, 2)
+  // Blue/Red side
+  blueSideGames         Int?              @map("blue_side_games")
+  blueSideWins          Int?              @map("blue_side_wins")
+  redSideGames          Int?              @map("red_side_games")
+  redSideWins           Int?              @map("red_side_wins")
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@unique([championId, patch, league, role])
+  @@index([patch])
+  @@index([championId])
+  @@index([league])
+  @@map("lol_champion_stats")
+}
+
+// ===== LOL PLAYER CHAMPION STATS =====
+model LolPlayerChampionStats {
+  id                    String            @id @default(uuid())
+  lolPlayerId           String            @map("lol_player_id")
+  championId            Int               @map("champion_id")
+  championName          String            @map("champion_name") @db.VarChar(100)
+  season                String?           @db.VarChar(50)
+  league                String?           @db.VarChar(100)
+  gamesPlayed           Int               @default(0) @map("games_played")
+  wins                  Int               @default(0)
+  losses                Int               @default(0)
+  winRate               Decimal?          @map("win_rate") @db.Decimal(5, 4)
+  avgKills              Decimal?          @map("avg_kills") @db.Decimal(5, 2)
+  avgDeaths             Decimal?          @map("avg_deaths") @db.Decimal(5, 2)
+  avgAssists            Decimal?          @map("avg_assists") @db.Decimal(5, 2)
+  avgKda                Decimal?          @map("avg_kda") @db.Decimal(5, 2)
+  avgCs                 Decimal?          @map("avg_cs") @db.Decimal(7, 2)
+  avgGold               Decimal?          @map("avg_gold") @db.Decimal(9, 2)
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@unique([lolPlayerId, championId, season, league])
+  @@index([lolPlayerId])
+  @@index([championId])
+  @@map("lol_player_champion_stats")
+}
+
+// ===== LOL RECORDS =====
+model LolRecord {
+  id                    String            @id @default(uuid())
+  category              String            @db.VarChar(100) // kills, kda, winstreak, earnings, championships
+  subcategory           String?           @db.VarChar(100) // single_game, career, season
+  recordValue           Decimal           @map("record_value") @db.Decimal(14, 2)
+  recordHolderId        String?           @map("record_holder_id") @db.VarChar(255) // player or team ID
+  recordHolderName      String            @map("record_holder_name") @db.VarChar(255)
+  recordHolderType      String            @map("record_holder_type") @db.VarChar(20) // player, team
+  recordDate            DateTime?         @map("record_date") @db.Date
+  tournamentId          String?           @map("tournament_id") @db.VarChar(255)
+  gameId                String?           @map("game_id") @db.VarChar(255)
+  context               String?           @db.Text
+  source                String?           @db.VarChar(100)
+  createdAt             DateTime          @default(now()) @map("created_at")
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@unique([category, subcategory])
+  @@index([category])
+  @@map("lol_records")
+}
+
+// ===== LOL STATIC DATA - CHAMPIONS =====
+model LolChampion {
+  championId            Int               @id @map("champion_id")
+  name                  String            @db.VarChar(100)
+  title                 String?           @db.VarChar(255)
+  key                   String            @unique @db.VarChar(50)
+  roles                 Json?             // Array of roles
+  imageUrl              String?           @map("image_url") @db.Text
+  splashUrl             String?           @map("splash_url") @db.Text
+  releaseDate           DateTime?         @map("release_date") @db.Date
+  data                  Json?
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@map("lol_champions")
+}
+
+// ===== LOL STATIC DATA - ITEMS =====
+model LolItem {
+  itemId                Int               @id @map("item_id")
+  name                  String            @db.VarChar(255)
+  description           String?           @db.Text
+  plaintext             String?           @db.VarChar(500)
+  gold                  Int?
+  imageUrl              String?           @map("image_url") @db.Text
+  tags                  Json?
+  stats                 Json?
+  isCompleted           Boolean           @default(false) @map("is_completed")
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@map("lol_items")
+}
+
+// ===== LOL STATIC DATA - PATCHES =====
+model LolPatch {
+  patch                 String            @id @db.VarChar(20)
+  releaseDate           DateTime?         @map("release_date") @db.Date
+  highlightUrl          String?           @map("highlight_url") @db.Text
+  notesUrl              String?           @map("notes_url") @db.Text
+  isCurrentPatch        Boolean           @default(false) @map("is_current_patch")
+  data                  Json?
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@map("lol_patches")
+}
+
+// ===== LOL LIVE GAMES CACHE =====
+model LolLiveGame {
+  id                    String            @id @default(uuid())
+  gameId                String            @unique @map("game_id") @db.VarChar(255)
+  matchId               String?           @map("match_id") @db.VarChar(255)
+  leagueId              String?           @map("league_id") @db.VarChar(255)
+  blueTeamSlug          String            @map("blue_team_slug") @db.VarChar(255)
+  redTeamSlug           String            @map("red_team_slug") @db.VarChar(255)
+  state                 String            @db.VarChar(20) // inProgress, paused
+  gameTime              Int?              @map("game_time") // current game time in seconds
+  // Live scores
+  blueKills             Int?              @map("blue_kills")
+  blueGold              Int?              @map("blue_gold")
+  blueTowers            Int?              @map("blue_towers")
+  blueDragons           Int?              @map("blue_dragons")
+  blueBarons            Int?              @map("blue_barons")
+  redKills              Int?              @map("red_kills")
+  redGold               Int?              @map("red_gold")
+  redTowers             Int?              @map("red_towers")
+  redDragons            Int?              @map("red_dragons")
+  redBarons             Int?              @map("red_barons")
+  // Player stats snapshot
+  playerStats           Json?             @map("player_stats")
+  lastEventTime         Int?              @map("last_event_time")
+  createdAt             DateTime          @default(now()) @map("created_at")
+  lastUpdated           DateTime          @default(now()) @map("last_updated")
+
+  @@index([leagueId])
+  @@index([state])
+  @@map("lol_live_games")
 }
