@@ -42,14 +42,18 @@ export function createApp(): Express {
   // Root endpoint
   app.get('/', (req, res) => {
     res.json({
-      name: 'Fortnite Competitive API',
+      name: 'Cito API',
       version: config.apiVersion,
       status: 'running',
+      description: 'Esports data infrastructure for Fortnite, Call of Duty, and League of Legends',
       endpoints: {
         health: `/api/${config.apiVersion}/health`,
-        auth: `/api/${config.apiVersion}/auth`,
-        docs: 'https://github.com/yourusername/fortnite-competitive-api',
+        fortnite: `/api/${config.apiVersion}/fortnite`,
+        cod: `/api/${config.apiVersion}/cod`,
+        lol: `/api/${config.apiVersion}/lol`,
       },
+      docs: 'https://docs.citoapi.com',
+      dashboard: 'https://dashboard.citoapi.com',
     });
   });
 

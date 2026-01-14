@@ -5,7 +5,7 @@ import { initializeJobs } from './jobs/index.js';
 import { tokenManager } from './services/epic/token-manager.js';
 
 /**
- * Start the Fortnite Competitive API server
+ * Start the Cito API server
  */
 
 async function startServer() {
@@ -33,7 +33,7 @@ async function startServer() {
     // Start server
     const server = app.listen(config.port, () => {
       console.log('');
-      console.log('🚀 Fortnite Competitive API is running!');
+      console.log('🚀 Cito API is running!');
       console.log('');
       console.log(`📍 Server: http://localhost:${config.port}`);
       console.log(`📍 API Base: http://localhost:${config.port}/api/${config.apiVersion}`);
