@@ -69,6 +69,23 @@ interface Config {
     earningsAggregator: boolean;
   };
 
+  // Stripe (payments)
+  stripe: {
+    secretKey: string;
+    webhookSecret: string;
+    prices: {
+      developer: string;
+      business: string;
+    };
+  };
+
+  // Firebase
+  firebase: {
+    projectId: string;
+    clientEmail: string;
+    privateKey: string;
+  };
+
   // External Services (optional)
   sentry?: {
     dsn: string;
@@ -163,6 +180,21 @@ export const config: Config = {
     transferScraper: getEnvBoolean('ENABLE_TRANSFER_SCRAPER', true),
     statsRefresh: getEnvBoolean('ENABLE_STATS_REFRESH', true),
     earningsAggregator: getEnvBoolean('ENABLE_EARNINGS_AGGREGATOR', true),
+  },
+
+  stripe: {
+    secretKey: getEnvOptional('STRIPE_SECRET_KEY') || '',
+    webhookSecret: getEnvOptional('STRIPE_WEBHOOK_SECRET') || '',
+    prices: {
+      developer: getEnvOptional('STRIPE_PRICE_DEVELOPER') || '', // $29/month
+      business: getEnvOptional('STRIPE_PRICE_BUSINESS') || '', // $99/month
+    },
+  },
+
+  firebase: {
+    projectId: getEnvOptional('FIREBASE_PROJECT_ID') || '',
+    clientEmail: getEnvOptional('FIREBASE_CLIENT_EMAIL') || '',
+    privateKey: (getEnvOptional('FIREBASE_PRIVATE_KEY') || '').replace(/\\n/g, '\n'),
   },
 
   sentry: process.env.SENTRY_DSN
