@@ -112,9 +112,11 @@ router.post('/sync', firebaseAuth, async (req: Request, res: Response): Promise<
   } catch (error: unknown) {
     const err = error as Error;
     console.error('[FirebaseAuth] Sync error:', err);
+    console.error('[FirebaseAuth] Sync error stack:', err.stack);
     res.status(500).json({
       success: false,
       error: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
     });
   }
 });
@@ -328,7 +330,7 @@ router.get('/api-keys/:keyId/usage', firebaseAuth, requireApiUser, async (req: R
     }
 
     // Get usage stats
-    const usage = await apiKeyService.getKeyUsageStats(keyId, days);
+    const usage = await apiKeyService.getKeyUsageStats(keyId, req.apiUser!.id, days);
 
     res.json({
       success: true,
